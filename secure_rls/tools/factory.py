@@ -32,6 +32,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from secure_rls.security.gateway import CohortTooSmall, QueryGateway, QueryResult
+from secure_rls.security.layers import layer_of
 from secure_rls.security.output_guard import LeakDetected
 from secure_rls.security.spec import (
     Aggregate,
@@ -180,17 +181,29 @@ def _summarise(result: QueryResult, note: str = "") -> str:
     return "\n".join(lines)
 
 
+def refusal_layer(exc: Exception) -> str:
+    """Which layer refused, as a short label for the trace and the UI."""
+    layer = layer_of(exc)
+    return layer.label if layer else "policy"
+
+
 def _explain_refusal(exc: Exception) -> str:
-    """Turn a policy rejection into something the model can act on this turn."""
+    """Turn a policy rejection into something the model can act on this turn.
+
+    The layer is named in the message. It costs nothing, and it turns a generic
+    "I can't do that" into a statement about where the boundary actually is --
+    which is the point of the whole design.
+    """
+    where = refusal_layer(exc)
     if isinstance(exc, CohortTooSmall):
-        return f"REFUSED (minimum cohort size): {exc}"
+        return f"REFUSED [{where}] (minimum cohort size): {exc}"
     if isinstance(exc, SqlRejected):
-        return f"REFUSED (query policy): {exc}. Rewrite the query within the allowed schema."
+        return f"REFUSED [{where}] (query policy): {exc}. Rewrite within the allowed schema."
     if isinstance(exc, SpecError):
-        return f"REFUSED (request policy): {exc}"
+        return f"REFUSED [{where}] (request policy): {exc}"
     if isinstance(exc, LeakDetected):
-        return f"BLOCKED (output guard): {exc}"
-    return f"REFUSED: {exc}"
+        return f"BLOCKED [{where}]: {exc}"
+    return f"REFUSED [{where}]: {exc}"
 
 
 # ------------------------------------------------------------------ tools ---

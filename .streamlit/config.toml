@@ -1,0 +1,22 @@
+# Streamlit paints its own header and toolbar before the script runs, so any
+# CSS injected from Python arrives too late to hide the busy indicator on a
+# cold load -- and app startup here takes a few seconds (imports, listing local
+# models), which is exactly when it is most visible.
+#
+# `toolbarMode = "minimal"` removes that chrome server-side, from the first
+# paint, so there is no window for it to appear in. The CSS in app.py still
+# handles the in-page spinner during a rerun.
+[client]
+toolbarMode = "minimal"
+showErrorDetails = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+
+[server]
+# The demo runs locally against a local model; nothing here should be reaching
+# out, and file watching restarts the app under the user mid-question.
+fileWatcherType = "none"

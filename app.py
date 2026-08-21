@@ -53,7 +53,8 @@ STATUS_ICON = {"ok": "🟢", "refused": "🟡", "blocked": "🔴", "info": "⚪"
 st.markdown(
     """
     <style>
-      [data-testid="stStatusWidget"] { display: none !important; }
+      [data-testid="stStatusWidget"],
+      [data-testid="stStatusWidgetRunningIcon"] { display: none !important; }
 
       [data-testid="stSpinnerIcon"],
       [data-testid="stSpinner"] > div > i,
@@ -228,7 +229,10 @@ def render_trace(trace: list[dict]) -> None:
     for s in trace:
         icon = STATUS_ICON.get(s.get("status", "info"), "⚪")
         timing = f"  ·  {s['seconds']}s" if s.get("seconds") else ""
-        st.markdown(f"{icon} **{s['kind']}** — {s['label']}{timing}")
+        # Name the layer that refused. A generic "I can't do that" says nothing;
+        # "refused by L4 database boundary" says where the boundary actually is.
+        layer = f"  ·  refused by `{s['layer']}`" if s.get("layer") else ""
+        st.markdown(f"{icon} **{s['kind']}** — {s['label']}{timing}{layer}")
         if s.get("detail"):
             st.caption(s["detail"])
         if s.get("sql"):
@@ -351,10 +355,13 @@ def render_security(session) -> None:
         st.write(reply.answer)
         render_trace(reply.trace)
         leaked = any(token in reply.answer for token in foreign)
+        stopped_by = [s["layer"] for s in reply.trace if s.get("layer")]
         if leaked:
             st.error("LEAK — this must never happen. The build gate would fail here.")
+        elif stopped_by:
+            st.success(f"Stopped by **{stopped_by[0]}**. No leak.")
         else:
-            st.success("Blocked or answered within your own organisation. No leak.")
+            st.success("Answered within your own organisation. No leak.")
 
     st.markdown("#### Audit log")
     rows = session.audit.rows()

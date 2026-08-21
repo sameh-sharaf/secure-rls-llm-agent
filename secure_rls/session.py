@@ -11,8 +11,10 @@ outside this module, that is the smell.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from langgraph.checkpoint.memory import InMemorySaver
 
 from db import DB_PATH
 from secure_rls.rag.retriever import CHROMA_PATH, TenantNotesRetriever
@@ -31,6 +33,14 @@ class Session:
     context: ToolContext
     tools: list
     audit: AuditLog
+    #: Conversation memory, owned by the session rather than by the agent.
+    #:
+    #: Switching model rebuilds the agent, and an agent-owned checkpointer went
+    #: with it -- so the new model started blind and could only see the turns it
+    #: had generated itself. Keeping it here means the whole thread survives a
+    #: model swap. It stays keyed by (thread, tenant), so this shares history
+    #: across models, never across tenants.
+    checkpointer: InMemorySaver = field(default_factory=InMemorySaver)
 
     @property
     def tool_map(self) -> dict:

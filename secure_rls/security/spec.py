@@ -17,6 +17,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from secure_rls.security.layers import Layer, tag
+
 #: Minimum number of underlying rows behind any reported aggregate.
 #:
 #: RLS answers "which rows may you read". It says nothing about "how precisely
@@ -209,19 +211,26 @@ def compile_spec(
 
     for column in spec.select:
         if column.value in masked_columns:
-            raise SpecError(
-                f"your role may not read {column.value} for individual employees; "
-                f"ask for an aggregate instead (for example, average {column.value} by department)"
+            raise tag(
+                SpecError(
+                    f"your role may not read {column.value} for individual employees; "
+                    f"ask for an aggregate instead (for example, average "
+                    f"{column.value} by department)"
+                ),
+                Layer.L1,  # the role decides; layer 3 only enforces the decision
             )
 
     for metric in spec.metrics:
         if metric.column.value in masked_columns and metric.agg.value in EXTREMAL_AGGREGATES:
-            raise SpecError(
-                f"your role may not read {metric.column.value} for individual employees, and "
-                f"{metric.agg.value.upper()}({metric.column.value}) reports one specific "
-                f"person's {metric.column.value}. Use an average or a median instead, and "
-                f"say plainly which statistic you computed -- do not present it as the "
-                f"{metric.agg.value}"
+            raise tag(
+                SpecError(
+                    f"your role may not read {metric.column.value} for individual "
+                    f"employees, and {metric.agg.value.upper()}({metric.column.value}) "
+                    f"reports one specific person's {metric.column.value}. Use an average "
+                    f"or a median instead, and say plainly which statistic you computed "
+                    f"-- do not present it as the {metric.agg.value}"
+                ),
+                Layer.L1,
             )
 
     projections: list[str] = [c.value for c in spec.group_by]

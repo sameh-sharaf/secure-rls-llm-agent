@@ -151,6 +151,62 @@ def test_fallback_ignores_empty_tool_messages() -> None:
     assert _fallback_from_tools(state).startswith("12 row(s)")
 
 
+# -------------------------------------------------- memory across models ---
+
+
+def test_switching_model_keeps_the_conversation() -> None:
+    """A newly selected model must see the whole thread, not only its own turns.
+
+    The checkpointer used to belong to the agent, and switching model rebuilds
+    the agent -- so the new model started blind. It now lives on the session.
+    """
+    session = build_session(authenticate("acme_admin", "acme123"), with_rag=False)
+    try:
+        first = SecureAgent(session, model="model-a")
+        second = SecureAgent(session, model="model-b")
+        assert first.checkpointer is second.checkpointer
+        assert first.checkpointer is session.checkpointer
+    finally:
+        session.close()
+
+
+def test_memory_is_still_keyed_by_tenant() -> None:
+    """Sharing history across models must not share it across tenants."""
+    acme = build_session(authenticate("acme_admin", "acme123"), with_rag=False)
+    beta = build_session(authenticate("beta_admin", "beta123"), with_rag=False)
+    try:
+        assert acme.checkpointer is not beta.checkpointer
+        assert acme.principal.cache_key("default") != beta.principal.cache_key("default")
+    finally:
+        acme.close()
+        beta.close()
+
+
+# ---------------------------------------------------------- layer labels ---
+
+
+def test_trace_step_carries_the_refusing_layer() -> None:
+    s = step("tool", "run_sql", status="refused", layer="L3 query gateway")
+    assert s["layer"] == "L3 query gateway"
+    assert step("plan", "thinking")["layer"] is None
+
+
+@pytest.mark.parametrize(
+    "content,expected",
+    [
+        ("REFUSED [L3 query gateway] (query policy): unknown table", "L3 query gateway"),
+        ("REFUSED [L1 identity & role policy] (request policy): nope", "L1 identity & role policy"),
+        ("BLOCKED [L5 output guard]: canary seen", "L5 output guard"),
+        ("12 row(s) returned.", None),
+        ("REFUSED: something untagged", None),
+    ],
+)
+def test_layer_is_read_back_from_the_tool_message(content: str, expected) -> None:
+    from agent import _layer_from
+
+    assert _layer_from(content) == expected
+
+
 # ---------------------------------------------------------------- router ---
 
 @pytest.mark.parametrize(

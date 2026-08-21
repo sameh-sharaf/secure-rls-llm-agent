@@ -72,6 +72,7 @@ def step(
     sql: str | None = None,
     status: Status = "info",
     seconds: float = 0.0,
+    layer: str | None = None,
 ) -> dict:
     """One visible step of the agent's reasoning, rendered in the UI.
 
@@ -86,6 +87,9 @@ def step(
         "sql": sql,
         "status": status,
         "seconds": round(seconds, 2),
+        # Which of L1-L5 refused, when one did. Naming it turns a generic
+        # refusal into a statement about where the boundary actually sits.
+        "layer": layer,
     }
 
 
@@ -247,7 +251,11 @@ class SecureAgent:
         self.tools = session.tools
         self.tool_map = session.tool_map
         self.llm_with_tools = self.llm.bind_tools(self.tools)
-        self.checkpointer = InMemorySaver()
+        # Reuse the session's checkpointer so conversation history survives a
+        # model switch. An agent-owned one was discarded whenever the agent was
+        # rebuilt, leaving the newly selected model able to see only the turns
+        # it had produced itself.
+        self.checkpointer = getattr(session, "checkpointer", None) or InMemorySaver()
         self.graph = self._build()
 
     # ------------------------------------------------------------- nodes ---
@@ -266,7 +274,7 @@ class SecureAgent:
                     "I only answer questions about your organisation's workforce data."
                 ),
                 "rejections": ["__reset__"],
-                "trace": fresh + [step("refuse", "Out of scope", status="refused")],
+                "trace": fresh + [step("refuse", "Out of scope", status="refused", layer="L1 identity & role policy")],
             }
 
         if _looks_cross_tenant(question, tenant):
@@ -281,7 +289,8 @@ class SecureAgent:
                     "organisation and I will answer it."
                 ),
                 "rejections": ["__reset__"],
-                "trace": fresh + [step("refuse", "Request spans organisations", status="refused")],
+                "trace": fresh + [step("refuse", "Request spans organisations", status="refused",
+                              layer="L1 identity & role policy")],
             }
 
         return {
@@ -358,6 +367,7 @@ class SecureAgent:
                     if artifact.sql:
                         sql = artifact.sql
                 status = "refused" if str(content).startswith(("REFUSED", "BLOCKED")) else "ok"
+                refused_by = _layer_from(str(content)) if status == "refused" else None
                 if status == "refused":
                     rejections.append(str(content))
                 trace.append(
@@ -368,6 +378,7 @@ class SecureAgent:
                         sql=sql,
                         status=status,
                         seconds=time.perf_counter() - started,
+                        layer=refused_by,
                     )
                 )
 
@@ -414,7 +425,7 @@ class SecureAgent:
                 ),
                 "trace": [
                     step("guard", "LEAK DETECTED", "; ".join(findings), status="blocked",
-                         seconds=elapsed)
+                         seconds=elapsed, layer="L5 output guard")
                 ],
             }
 
@@ -461,7 +472,7 @@ class SecureAgent:
                     "The output guard blocked this answer because it referenced data from "
                     "outside your organisation. This has been recorded in the audit log."
                 ),
-                "trace": [step("guard", "Answer blocked", str(exc), status="blocked")],
+                "trace": [step("guard", "Answer blocked", str(exc), status="blocked", layer="L5 output guard")],
             }
 
         return {
@@ -606,7 +617,14 @@ def _content_of(response: Any) -> str:
     return ""
 
 
-_REFUSAL_PREFIX = re.compile(r"^(REFUSED|BLOCKED)\s*(\([^)]*\))?:\s*", re.I)
+_REFUSAL_PREFIX = re.compile(r"^(REFUSED|BLOCKED)\s*(\[[^\]]*\])?\s*(\([^)]*\))?:\s*", re.I)
+_LAYER_IN_MESSAGE = re.compile(r"^(?:REFUSED|BLOCKED)\s*\[([^\]]+)\]", re.I)
+
+
+def _layer_from(content: str) -> str | None:
+    """Read the layer a tool tagged onto its refusal."""
+    match = _LAYER_IN_MESSAGE.match(content.strip())
+    return match.group(1) if match else None
 
 
 def _humanise_refusal(body: str) -> str:

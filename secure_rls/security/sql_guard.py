@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 import sqlglot
 from sqlglot import exp
 
+from secure_rls.security.layers import Layer, tag
 from secure_rls.security.spec import MIN_COHORT_SIZE
 
 DIALECT = "sqlite"
@@ -151,11 +152,14 @@ def _check_masked_columns(tree: exp.Expression, masked: frozenset[str]) -> bool:
             name = (column.name or "").lower()
             if name in masked:
                 verb = node.__class__.__name__.upper()
-                _fail(
-                    f"your role may not read {name} for individual employees, and "
-                    f"{verb}({name}) reports one specific person's {name}. "
-                    f"Use AVG({name}) or a median instead, and say plainly which "
-                    f"statistic you computed -- do not present it as the {verb.lower()}"
+                raise tag(
+                    SqlRejected(
+                        f"your role may not read {name} for individual employees, and "
+                        f"{verb}({name}) reports one specific person's {name}. "
+                        f"Use AVG({name}) or a median instead, and say plainly which "
+                        f"statistic you computed -- do not present it as the {verb.lower()}"
+                    ),
+                    Layer.L1,
                 )
 
     aggregate_nodes = tuple(tree.find_all(exp.AggFunc))
@@ -165,9 +169,12 @@ def _check_masked_columns(tree: exp.Expression, masked: frozenset[str]) -> bool:
             continue
         inside_aggregate = any(column in agg.find_all(exp.Column) for agg in aggregate_nodes)
         if not inside_aggregate:
-            _fail(
-                f"your role may not read {name} for individual employees; "
-                f"aggregate it instead, for example AVG({name})"
+            raise tag(
+                SqlRejected(
+                    f"your role may not read {name} for individual employees; "
+                    f"aggregate it instead, for example AVG({name})"
+                ),
+                Layer.L1,
             )
     return True
 
