@@ -125,6 +125,49 @@ def test_cte_named_employees_cannot_impersonate_the_view(
         acme.execute(sql).fetchall()
 
 
+def test_connection_survives_use_from_another_thread() -> None:
+    """Streamlit runs each rerun on a different thread from its pool.
+
+    SQLite connections are thread-bound by default, so a connection created
+    during one rerun raised ProgrammingError on the next. Nothing caught it:
+    the CLI smoke test, all three eval suites and 160 tests are single-threaded,
+    and the failure only appears once a rerun lands on a different thread. It
+    surfaced by running the actual app and typing a question.
+
+    The tenant binding is a property of the *connection* -- the temp table and
+    the authorizer -- not of the thread, so crossing threads does not weaken it.
+    """
+    import concurrent.futures
+
+    with TenantDatabase("acme") as database:
+        assert database.row_count() == 500
+
+        def query() -> int:
+            return database.row_count()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            results = [f.result() for f in [pool.submit(query) for _ in range(8)]]
+        assert results == [500] * 8
+
+
+def test_boundary_holds_when_crossed_from_another_thread(allowed_ids) -> None:
+    """A different thread must not get a different -- or wider -- view."""
+    import concurrent.futures
+
+    with TenantDatabase("acme") as database:
+
+        def attack() -> str:
+            try:
+                database.execute("SELECT user_id FROM employees_base LIMIT 5")
+                return "LEAKED"
+            except (SecurityError, sqlite3.DatabaseError):
+                return "blocked"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            verdicts = [f.result() for f in [pool.submit(attack) for _ in range(8)]]
+        assert set(verdicts) == {"blocked"}
+
+
 def test_statement_timeout_is_per_statement_not_per_connection() -> None:
     """A slow query must not poison every query that follows it.
 

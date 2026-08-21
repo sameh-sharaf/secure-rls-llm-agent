@@ -45,6 +45,7 @@ docs/adr/0004-postgres-parity.md).
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -245,7 +246,18 @@ def tenant_connection(
     """
     tenant = _require_known_tenant(tenant)
 
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    # `check_same_thread=False` because Streamlit runs each rerun on a
+    # different thread from its pool, and a thread-bound connection raises
+    # ProgrammingError the moment a rerun lands elsewhere.
+    #
+    # This does not weaken the boundary. Tenant binding is a property of the
+    # *connection* -- the materialised temp table and the installed authorizer
+    # -- and neither is thread-scoped; a different thread reaching this
+    # connection still sees exactly one tenant's rows and still cannot name the
+    # base table. What it does remove is sqlite3's protection against
+    # *concurrent* use, so `TenantDatabase` serialises every statement behind a
+    # lock. Trading a crash for a silent data race would be a poor deal.
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     _assert_no_shadow_relation(conn)
 
@@ -299,36 +311,46 @@ class TenantDatabase:
         self.tenant = _require_known_tenant(tenant)
         self._clock: dict = {}
         self._conn = tenant_connection(self.tenant, db_path, self._clock)
+        # The connection is no longer thread-bound (see `tenant_connection`),
+        # so every statement is serialised here instead. The lock must span
+        # execute *and* fetch: two threads interleaving on one cursor is how a
+        # crash becomes a wrong answer.
+        self._lock = threading.RLock()
 
     def execute(self, sql: str, params: Sequence[Any] | None = None) -> list[dict]:
         """Run a statement on the bound connection and return capped rows."""
-        # Reset the deadline per statement, so one slow query cannot poison the
-        # connection for every query after it.
-        self._clock["deadline"] = time.monotonic() + STATEMENT_TIMEOUT_SECONDS
-        try:
-            cursor = self._conn.execute(sql, tuple(params or ()))
-        except sqlite3.DatabaseError as exc:
-            # Sanitised: the raw message can name the base table, which tells an
-            # attacker what to aim at next (layer 5, error-message leakage).
-            raise SecurityError(f"query rejected by the database: {exc}") from exc
-        rows = cursor.fetchmany(MAX_ROWS)
+        with self._lock:
+            # Reset the deadline per statement, so one slow query cannot poison
+            # the connection for every query after it.
+            self._clock["deadline"] = time.monotonic() + STATEMENT_TIMEOUT_SECONDS
+            try:
+                cursor = self._conn.execute(sql, tuple(params or ()))
+                rows = cursor.fetchmany(MAX_ROWS)
+            except sqlite3.DatabaseError as exc:
+                # Sanitised: the raw message can name the base table, which
+                # tells an attacker what to aim at next (layer 5, error-message
+                # leakage).
+                raise SecurityError(f"query rejected by the database: {exc}") from exc
         return [dict(r) for r in rows]
 
     def columns(self) -> tuple[str, ...]:
         return AGENT_COLUMNS
 
     def row_count(self) -> int:
-        return int(self._conn.execute(f"SELECT COUNT(*) FROM {AGENT_TABLE}").fetchone()[0])
+        with self._lock:
+            return int(self._conn.execute(f"SELECT COUNT(*) FROM {AGENT_TABLE}").fetchone()[0])
 
     def sample(self, n: int = 3) -> list[dict]:
         """A few of the tenant's own rows, for grounding the model's schema view."""
-        rows = self._conn.execute(
-            f"SELECT {', '.join(AGENT_COLUMNS)} FROM {AGENT_TABLE} LIMIT ?", (n,)
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {', '.join(AGENT_COLUMNS)} FROM {AGENT_TABLE} LIMIT ?", (n,)
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def __enter__(self) -> TenantDatabase:
         return self

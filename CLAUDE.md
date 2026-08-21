@@ -105,6 +105,12 @@ python -m evals.ablation
 - **`langgraph.prebuilt` is broken** in this environment (version skew with
   `langgraph-prebuilt`). The tool node is hand-written; do not reintroduce the
   import.
+- **Streamlit runs each rerun on a different pool thread.** Anything stored in
+  `st.session_state` outlives the thread that created it, so a thread-bound
+  resource raises on the next interaction. SQLite connections are thread-bound
+  by default; `tenant_connection` passes `check_same_thread=False` and
+  `TenantDatabase` serialises statements behind a lock instead. Single-threaded
+  tests and CLI runs cannot catch this class -- run the app.
 - **Monkeypatch where the name is *looked up*, not where it is defined.**
   `gateway.py` does `from ...sql_guard import guard_sql`, so patching
   `sql_guard.guard_sql` changes nothing the gateway calls. The ablation harness
