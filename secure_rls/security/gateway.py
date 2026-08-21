@@ -199,6 +199,14 @@ class QueryGateway:
     def redact(self, text: str | None) -> str | None:
         return self._guard.redact(text)
 
+    def wrap_untrusted(self, chunks: list[str]) -> str:
+        return self._guard.wrap_untrusted(chunks)
+
+    @property
+    def allowed_user_ids(self) -> frozenset[int]:
+        """The independent id set, for binding into the retriever's post-check."""
+        return self._guard.allowed_user_ids
+
     def sample_rows(self, n: int = 3) -> list[dict]:
         return self._db.sample(n)
 

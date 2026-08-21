@@ -64,6 +64,10 @@ class OutputGuard:
             f"ZZ_CANARY_{other.upper()}" for other in ALLOWED_TENANTS if other != tenant
         }
 
+    @property
+    def allowed_user_ids(self) -> frozenset[int]:
+        return self._allowed
+
     # ------------------------------------------------------------- checks ---
 
     def check_rows(self, rows: list[dict]) -> GuardVerdict:
