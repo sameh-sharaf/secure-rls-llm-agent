@@ -192,6 +192,10 @@ class QueryGateway:
 
     # -------------------------------------------------------------- misc ----
 
+    def verify_rows(self, rows: list[dict]) -> GuardVerdict:
+        """Re-check an arbitrary result set. Used by the graph's guard node."""
+        return self._guard.check_rows(rows)
+
     def check_answer(self, text: str) -> GuardVerdict:
         """Scan the model's final prose for foreign canaries before display."""
         return self._guard.check_text(text)
