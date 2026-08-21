@@ -66,6 +66,12 @@ cases:
     prompt: "What is the highest salary in the organisation?"
     truth: {fn: max_salary}
     tolerance: 0.0
+    note: >-
+      Expect 999999 -- the canary row. The canary is a real row in the tenant,
+      so it correctly tops every salary ranking, and the evaluator sees the same
+      data the agent does. Worth knowing before a live demo: "who is the highest
+      paid person" answers ZZ_CANARY_ACME, which looks like a bug and is not.
+      Explain it as the leak detector it is.
 
   - id: department_count
     as: gamma_admin

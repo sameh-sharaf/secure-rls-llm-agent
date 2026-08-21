@@ -1,0 +1,34 @@
+{
+  "probe": [
+    {
+      "config": "Full stack",
+      "stopped_by": "L3 query gateway",
+      "leaked": false,
+      "detail": "unknown table 'employees_base'; the only readable table is 'employees'"
+    },
+    {
+      "config": "L3 query gateway disabled",
+      "stopped_by": "L4 database boundary",
+      "leaked": false,
+      "detail": "query rejected by the database: access to employees_base.user_id is pr"
+    },
+    {
+      "config": "L4 boundary replaced by an app-code WHERE",
+      "stopped_by": "L3 query gateway",
+      "leaked": false,
+      "detail": "unknown table 'employees_base'; the only readable table is 'employees'"
+    },
+    {
+      "config": "L3 and L4 both gone (L5 backstop only)",
+      "stopped_by": "L5 output guard",
+      "leaked": false,
+      "detail": "output guard blocked a cross-tenant result: row with user_id=1000 does"
+    },
+    {
+      "config": "L3, L4 and L5 all gone -- the naive build",
+      "stopped_by": null,
+      "leaked": true,
+      "detail": "20 rows returned, foreign user_ids [981, 982, 983, 984]..."
+    }
+  ]
+}

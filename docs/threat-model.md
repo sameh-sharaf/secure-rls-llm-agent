@@ -34,8 +34,14 @@ subset of that tenant's rows or raises. There is no third outcome, and no SQL
 — generated, adversarial, or accidental — changes that.
 
 Everything in layers 1, 2, 3 and 5 makes attacks cheaper to detect and rarer to
-reach the database. Layer 4 is what makes the claim true. `evals/ablation.py`
-demonstrates this by removing each layer in turn.
+reach the database.
+
+`evals/ablation.py` removes layers and measures the result. The measured answer
+is more nuanced than "L4 is the only thing holding": **L3, L4 and L5 are each
+independently sufficient** against generated SQL, and only stripping all three
+leaks. L4 remains the layer to point at for a reason the table cannot show —
+L3's guarantee holds only while its allowlist is complete, and ADR-0002 is the
+case where that reasoning failed. L4 anticipates nothing.
 
 ## Attack surface
 

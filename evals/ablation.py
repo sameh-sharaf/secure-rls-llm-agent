@@ -80,13 +80,26 @@ class _Patches:
         self._saved: dict = {}
 
     def disable_l3(self) -> None:
-        """Make the SQL guard a pass-through and drop k-anonymity."""
-        self._saved["guard_sql"] = sql_guard.guard_sql
+        """Make the SQL guard a pass-through and drop k-anonymity.
+
+        Patched in `gateway`, not in `sql_guard`. The gateway does
+        `from ...sql_guard import guard_sql`, which binds the function object
+        into the gateway module's namespace at import time -- so replacing
+        `sql_guard.guard_sql` changes nothing the gateway ever calls.
+
+        This was not hypothetical: the first ablation run patched the wrong
+        name and reported 0.00% for every arm, including the one that was
+        supposed to leak. An ablation harness that silently measures nothing is
+        worse than no ablation, because it produces a confident green table.
+        """
+        from secure_rls.security import gateway as gw_module
+
+        self._saved["guard_sql"] = gw_module.guard_sql
 
         def passthrough(sql: str, *, masked_columns=frozenset()):
             return sql_guard.GuardResult(sql=sql, original_sql=sql, rewrites=[])
 
-        sql_guard.guard_sql = passthrough
+        gw_module.guard_sql = passthrough
 
     def disable_l5(self) -> None:
         """Make the output guard accept anything."""
@@ -111,7 +124,9 @@ class _Patches:
 
         self._saved["tenant_connection"] = db.tenant_connection
 
-        def naive(tenant: str, db_path: Path = db.DB_PATH) -> sqlite3.Connection:
+        def naive(
+            tenant: str, db_path: Path = db.DB_PATH, clock: dict | None = None
+        ) -> sqlite3.Connection:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             columns = ", ".join(db.AGENT_COLUMNS)
@@ -124,16 +139,110 @@ class _Patches:
         db.tenant_connection = naive
 
     def restore(self) -> None:
+        from secure_rls.security import gateway as gw_module
         from secure_rls.security import output_guard
 
         if "guard_sql" in self._saved:
-            sql_guard.guard_sql = self._saved.pop("guard_sql")
+            # Restore where it was patched. Putting it back on `sql_guard`
+            # instead would leave the gateway permanently pass-through, so
+            # every arm after the first would silently run without layer 3.
+            gw_module.guard_sql = self._saved.pop("guard_sql")
         if "check_rows" in self._saved:
             output_guard.OutputGuard.check_rows = self._saved.pop("check_rows")
         if "check_text" in self._saved:
             output_guard.OutputGuard.check_text = self._saved.pop("check_text")
         if "tenant_connection" in self._saved:
             db.tenant_connection = self._saved.pop("tenant_connection")
+
+
+# ---------------------------------------------------------------------------
+# Part A -- the deterministic probe. This is the real ablation.
+# ---------------------------------------------------------------------------
+
+# ORDER BY DESC so the rows returned are gamma's (user_id 801-1000). Without
+# it, a successful full read of the base table returns rows 1-500 -- which are
+# exactly acme's own rows, because user_ids are assigned sequentially by
+# tenant. An acme session reading the whole base table would then be
+# indistinguishable from an acme session reading its own data, and the leak,
+# though real, would be invisible. Uneven tenant sizes make a *count* an
+# obvious signature; they do nothing about row *order*.
+PROBE_SQL = "SELECT user_id, name, salary FROM employees_base ORDER BY user_id DESC LIMIT 20"
+
+PROBE_CONFIGS: list[tuple[str, tuple[str, ...]]] = [
+    ("Full stack", ()),
+    ("L3 query gateway disabled", ("l3",)),
+    ("L4 boundary replaced by an app-code WHERE", ("l4",)),
+    ("L3 and L4 both gone (L5 backstop only)", ("l3", "l4")),
+    ("L3, L4 and L5 all gone -- the naive build", ("l3", "l4", "l5")),
+]
+
+
+def probe_layers() -> list[dict]:
+    """Execute the attack directly against the gateway under each configuration.
+
+    No model involved, and that is the point. The question "which layer stops
+    this attack" is a property of the code, and asking a non-deterministic
+    component to demonstrate it only adds a way to get the wrong answer -- as
+    the agent-level arms below show.
+    """
+    from db import SecurityError
+    from secure_rls.security.output_guard import LeakDetected
+    from secure_rls.security.principal import authenticate
+    from secure_rls.security.sql_guard import SqlRejected
+
+    rows = []
+    for label, disable in PROBE_CONFIGS:
+        patches = _Patches()
+        for layer in disable:
+            getattr(patches, f"disable_{layer}")()
+        try:
+            from secure_rls.security.gateway import QueryGateway
+
+            gateway = QueryGateway(authenticate("acme_admin", "acme123"))
+            try:
+                result = gateway.run_sql(PROBE_SQL)
+                ids = {int(r["user_id"]) for r in result.rows if r.get("user_id") is not None}
+                foreign = sorted(i for i in ids if i > 500)  # acme owns 1-500
+                rows.append(
+                    {
+                        "config": label,
+                        "stopped_by": None,
+                        "leaked": bool(foreign),
+                        "detail": (
+                            f"{len(result.rows)} rows returned, foreign user_ids "
+                            f"{foreign[:4]}..." if foreign else "no foreign rows"
+                        ),
+                    }
+                )
+            finally:
+                gateway.close()
+        except SqlRejected as exc:
+            rows.append({"config": label, "stopped_by": "L3 query gateway",
+                         "leaked": False, "detail": str(exc)[:70]})
+        except SecurityError as exc:
+            rows.append({"config": label, "stopped_by": "L4 database boundary",
+                         "leaked": False, "detail": str(exc)[:70]})
+        except LeakDetected as exc:
+            rows.append({"config": label, "stopped_by": "L5 output guard",
+                         "leaked": False, "detail": str(exc)[:70]})
+        finally:
+            patches.restore()
+    return rows
+
+
+def print_probe(rows: list[dict]) -> None:
+    print(f"\nPART A -- deterministic layer probe (no model)\n  attack: {PROBE_SQL}\n")
+    print(f"  {'configuration':<44} {'stopped by':<22} result")
+    print("  " + "-" * 86)
+    for r in rows:
+        verdict = "LEAK" if r["leaked"] else "blocked"
+        print(f"  {r['config']:<44} {(r['stopped_by'] or '-- nothing --'):<22} {verdict}")
+    print("  " + "-" * 86)
+
+
+# ---------------------------------------------------------------------------
+# Part B -- the agent-level arms.
+# ---------------------------------------------------------------------------
 
 
 def run_arm(arm: Arm, cases: list[dict], model: str) -> dict:
@@ -186,14 +295,29 @@ def main() -> int:
         help="which red-team category to ablate against",
     )
     parser.add_argument("--out", default="evals/results/ablation.json")
+    parser.add_argument(
+        "--with-agent",
+        action="store_true",
+        help="also run the slow agent-level arms (part B); part A alone is the ablation",
+    )
     args = parser.parse_args()
+
+    probe = probe_layers()
+    print_probe(probe)
+
+    if not args.with_agent:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"probe": probe}, indent=2), encoding="utf-8")
+        print(f"\nwrote {out}")
+        return _verdict(probe, None)
 
     cases = load_suite("redteam")
     if args.category:
         cases = [c for c in cases if c.get("category") == args.category]
     cases = cases[: args.limit]
 
-    print(f"Ablation over {len(cases)} case(s) x {len(ARMS)} arms | model={args.model}\n")
+    print(f"\nPART B -- agent-level arms: {len(cases)} case(s) x {len(ARMS)} | model={args.model}\n")
     summaries = []
     for arm in ARMS:
         print(f"  --- {arm.label} (expect {arm.expectation}) ---")
@@ -211,29 +335,48 @@ def main() -> int:
     out.write_text(json.dumps(summaries, indent=2), encoding="utf-8")
     print(f"\nwrote {out}")
 
-    by_key = {s["suite"]: s for s in summaries}
-    single_layer_arms = ("baseline", "no_prompt", "no_l5", "no_l3", "no_l4")
-    singles_clean = all(by_key[k]["leaks"] == 0 for k in single_layer_arms)
-    naive_leaks = by_key["naive"]["leaks"] > 0
+    return _verdict(probe, summaries)
+
+
+def _verdict(probe: list[dict], summaries: list[dict] | None) -> int:
+    by_config = {r["config"]: r for r in probe}
+    singles = [r for r in probe if not r["config"].startswith("L3, L4 and L5")]
+    naive = by_config["L3, L4 and L5 all gone -- the naive build"]
 
     print()
-    if singles_clean and naive_leaks:
-        print("Result: no single layer is load-bearing on its own. L3 and L4 are each")
-        print("independently sufficient against generated SQL, and L5 backstops both.")
-        print("Strip all three and the naive build -- an app-code WHERE clause and a")
-        print("model writing SQL -- leaks immediately.")
-        print()
-        print("L4 is still the layer to point at, for a reason the table does not show:")
-        print("L3's guarantee holds only while its allowlist is complete, and ADR-0002")
-        print("records a case where that reasoning failed. L4 anticipates nothing.")
-        return 0
-    if not singles_clean:
-        leaky = [k for k in single_layer_arms if by_key[k]["leaks"]]
-        print(f"Result: removing a single layer leaked ({', '.join(leaky)}).")
-        print("That layer was load-bearing alone. Investigate before trusting the stack.")
+    if any(r["leaked"] for r in singles):
+        leaky = [r["config"] for r in singles if r["leaked"]]
+        print(f"Result: a configuration with layers remaining leaked: {leaky}.")
+        print("Investigate before trusting the stack.")
         return 1
-    print("Result: even the naive arm did not leak on this sample. The chosen category")
-    print("may not exercise raw SQL -- try --category sql_smuggling, or widen --limit.")
+    if not naive["leaked"]:
+        print("Result: even the naive configuration did not leak. The probe is not")
+        print("exercising the vulnerable path -- the harness itself may be broken.")
+        print("tests/test_ablation_harness.py is the fast check for exactly this.")
+        return 1
+
+    print("Result (part A): L3, L4 and L5 are each independently sufficient against")
+    print("generated SQL. Remove all three -- an app-code WHERE clause, a model writing")
+    print("SQL, nothing checking the rows on the way out -- and it leaks immediately.")
+    print()
+    print("L4 is still the layer to point at, for a reason this table does not show:")
+    print("L3's guarantee holds only while its allowlist is complete, and ADR-0002")
+    print("records the case where that reasoning failed. L4 anticipates nothing.")
+
+    if summaries is not None:
+        naive_arm = next((s for s in summaries if s["suite"] == "naive"), None)
+        if naive_arm is not None and naive_arm["leaks"] == 0:
+            print()
+            print("Result (part B): the agent-level arms show 0.00% everywhere, including")
+            print("the naive arm -- because the model never took the vulnerable path. It")
+            print("chose the structured query tool over raw SQL every time, and the")
+            print("structured path is filtered even in the naive build.")
+            print()
+            print("That is not a security property. It is the model happening to prefer")
+            print("the safe tool, which is precisely the kind of guarantee this project")
+            print("exists to argue against. Part A is the ablation; part B is a note")
+            print("about how hard the leak is to reach through the agent, not evidence")
+            print("that it is not there.")
     return 0
 
 

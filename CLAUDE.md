@@ -39,7 +39,8 @@ project exists to demonstrate.
 
 7. **The security prompt is the weakest control and is never the argument.**
    If a change is only safe because the prompt says so, it is not safe.
-   `evals/ablation.py` deletes the prompt and expects the leak rate not to move.
+   `evals/ablation.py` fires the attack at the gateway with no model and no
+   prompt in the picture at all, and expects the layers to hold anyway.
 
 ## Layout
 
@@ -65,7 +66,7 @@ python -m ruff check .               # lint
 python -m streamlit run app.py       # the app
 python scripts/smoke_agent.py        # end-to-end with a live model
 python -m evals.runner --suite redteam --category sql_smuggling
-python -m evals.ablation --limit 8
+python -m evals.ablation
 ```
 
 ## Conventions
@@ -92,3 +93,13 @@ python -m evals.ablation --limit 8
 - **`langgraph.prebuilt` is broken** in this environment (version skew with
   `langgraph-prebuilt`). The tool node is hand-written; do not reintroduce the
   import.
+- **Monkeypatch where the name is *looked up*, not where it is defined.**
+  `gateway.py` does `from ...sql_guard import guard_sql`, so patching
+  `sql_guard.guard_sql` changes nothing the gateway calls. The ablation harness
+  did exactly this and reported a confident 0.00% for every arm, including the
+  one built to leak. `tests/test_ablation_harness.py` exists so the harness
+  cannot silently measure nothing again — run it before trusting an eval.
+- **Row order hides leaks.** `user_id` is sequential by tenant, so acme owns
+  1-500. An unbounded read of the base table by an *acme* session returns acme's
+  own rows first and looks legitimate. Attacks meant to demonstrate a leak
+  should act as `gamma` or use `ORDER BY user_id DESC`.

@@ -18,6 +18,7 @@ data/chroma/
 evals/results/*
 !evals/results/redteam.json
 !evals/results/report.md
+!evals/results/ablation.json
 
 .env
 .DS_Store
