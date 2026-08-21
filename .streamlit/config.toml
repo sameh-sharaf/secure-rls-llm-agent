@@ -14,7 +14,15 @@ showErrorDetails = true
 gatherUsageStats = false
 
 [theme]
-base = "light"
+# Pinned rather than left to the viewer, because `toolbarMode = "minimal"`
+# above also removes the hamburger menu that Streamlit puts its theme switcher
+# in. Hiding the busy indicator and hiding the settings menu are the same
+# switch, so the theme has to be decided here. To change it, edit this block.
+base = "dark"
+primaryColor = "#7B92FF"
+backgroundColor = "#0E1116"
+secondaryBackgroundColor = "#161A21"
+textColor = "#E4E7EC"
 
 [server]
 # The demo runs locally against a local model; nothing here should be reaching
