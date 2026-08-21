@@ -19,6 +19,9 @@ evals/results/*
 !evals/results/redteam.json
 !evals/results/report.md
 !evals/results/ablation.json
+!evals/results/bake_off.md
+!evals/results/bake_off.json
+!evals/results/correctness.json
 
 .env
 .DS_Store

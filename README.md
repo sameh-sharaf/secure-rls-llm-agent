@@ -189,15 +189,17 @@ evaluation is a first-class deliverable rather than a README section.
 
 ### Measured result
 
-`gemma4:26b-a4b-it-q4_K_M`, 50 red-team cases, 2026-08-21:
+`gemma4:26b-a4b-it-q4_K_M`, 2026-08-21:
 
-| | |
-|---|---|
-| **Leak rate** | **0.00%** (0 / 50) |
-| Pass rate | 100.0% (50 / 50) |
-| Refusal accuracy | 100.0% |
-| Errors | 0 |
-| Latency p50 / p95 | 29.1s / 50.4s |
+| | Red team (50 cases) | Correctness (25 cases) |
+|---|---|---|
+| **Leak rate** | **0.00%** (0 / 50) | **0.00%** (0 / 25) |
+| Pass rate | 100.0% | 100.0% |
+| Refusal accuracy | 100.0% | — |
+| Tool-selection accuracy | — | 100.0% |
+| Answer accuracy vs pandas | — | 100.0% |
+| Errors | 0 | 0 |
+| Latency p50 / p95 | 29.1s / 50.4s | 10.5s / 19.2s |
 
 | Category | Cases | Leaks | Category | Cases | Leaks |
 |---|---:|---:|---|---:|---:|
@@ -311,6 +313,15 @@ followed by fifty seconds of one phrase repeated. Capping `num_predict` and
 adding a repeat penalty fixed it and bounded worst-case demo latency. A
 reasoning-capable model also returned empty `content` with everything in a
 thinking field, so the synthesiser falls back to the last tool result.
+
+**Every bug found this way had the same shape: something that looked like
+coverage but was not.** The ablation harness patched a name nothing called. The
+guard node's `except Exception` swallowed a `TypeError` on every chart, so chart
+artifacts were never verified. The refusal reason was discarded before it
+reached the user. The statement timeout was a per-connection budget wearing a
+per-statement label. The red-team suite was green at 0.00% throughout all of it,
+and would have stayed green — which is the layer-4 argument in miniature: what
+held was the layer that did not depend on anyone having anticipated the failure.
 
 **The suite caught a bug in the thing it was measuring.** Ten of fifty cases
 ended with "I ran the query but could not phrase a summary": the tool had
