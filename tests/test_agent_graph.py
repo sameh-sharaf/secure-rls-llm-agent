@@ -193,6 +193,86 @@ def test_fallback_ignores_empty_tool_messages() -> None:
     assert _fallback_from_tools(state).startswith("12 row(s)")
 
 
+# --------------------------------- a refused turn must not be narrated ---
+# Reported: an analyst asked "who has the highest salary?". Every tool call was
+# refused -- L2, L1, L2 -- and the model was then asked to write an answer with
+# no data. It invented one: "the highest salary among all employees: EUR
+# 250,000", a figure that appears nowhere in the dataset. A second run emitted
+# its own tool-call syntax as the answer instead.
+#
+# The boundary held perfectly in both. What failed is that refusing without
+# explaining leaves a silence, and a language model will fill it.
+
+
+def test_a_turn_where_every_tool_was_refused_answers_with_the_reason() -> None:
+    from agent import _refusal_answer
+
+    turn = [
+        HumanMessage(content="who has the highest salary?"),
+        ToolMessage(
+            content="REFUSED [L2 tool contract] (invalid arguments): 'salary desc' is bad",
+            tool_call_id="1",
+        ),
+        ToolMessage(
+            content=(
+                "REFUSED [L1 identity & role policy] (request policy): your role may not "
+                "read salary for individual employees; ask for an aggregate instead"
+            ),
+            tool_call_id="2",
+        ),
+    ]
+    answer, layer = _refusal_answer({"turn_start": 0, "messages": turn})
+    assert answer, "a turn with only refusals must produce the policy reason"
+    assert "may not read salary" in answer
+    assert layer == "L1 identity & role policy"
+
+
+def test_policy_refusal_is_preferred_over_a_malformed_call() -> None:
+    """L2 means the model botched its own arguments -- not the user's concern."""
+    from agent import _refusal_answer
+
+    turn = [
+        ToolMessage(
+            content="REFUSED [L1 identity & role policy] (request policy): role may not read salary",
+            tool_call_id="1",
+        ),
+        ToolMessage(
+            content="REFUSED [L2 tool contract] (invalid arguments): 'salary desc' is bad",
+            tool_call_id="2",
+        ),
+    ]
+    answer, layer = _refusal_answer({"turn_start": 0, "messages": turn})
+    assert "role may not read salary" in answer
+    assert layer == "L1 identity & role policy"
+
+
+def test_a_successful_tool_result_is_not_treated_as_a_refusal() -> None:
+    from agent import _refusal_answer
+
+    turn = [
+        ToolMessage(content="REFUSED [L2 tool contract]: bad args", tool_call_id="1"),
+        ToolMessage(content="7 row(s) returned.", tool_call_id="2"),
+    ]
+    assert _refusal_answer({"turn_start": 0, "messages": turn}) == (None, None)
+
+
+def test_a_turn_with_no_tools_at_all_is_left_to_the_model() -> None:
+    from agent import _refusal_answer
+
+    turn = [HumanMessage(content="hello")]
+    assert _refusal_answer({"turn_start": 0, "messages": turn}) == (None, None)
+
+
+def test_refusals_from_an_earlier_turn_are_ignored() -> None:
+    from agent import _refusal_answer
+
+    messages = [
+        ToolMessage(content="REFUSED [L1 identity & role policy]: old", tool_call_id="old"),
+        HumanMessage(content="a fresh question"),
+    ]
+    assert _refusal_answer({"turn_start": 1, "messages": messages}) == (None, None)
+
+
 # ------------------------------------------------ refusal must not stick ---
 
 

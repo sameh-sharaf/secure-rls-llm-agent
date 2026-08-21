@@ -89,6 +89,15 @@ Stating these plainly is part of the model.
 - **The model being wrong.** Nothing here prevents a hallucinated number. That
   is a correctness problem, measured separately by the correctness suite, and
   it is not a confidentiality problem.
+
+  One case is worth naming, because the boundary working made it *more* likely:
+  an analyst asked for the highest salary, every tool call was refused, and the
+  model -- asked to write an answer with no data in hand -- produced a specific
+  figure that appears nowhere in the dataset. A refusal with no explanation
+  leaves a silence, and a language model fills a silence. A turn that yields
+  only refusals is now answered with the refusal itself and never narrated by
+  the model (`_refusal_answer` in agent.py). Refusing safely and refusing
+  *legibly* are different problems, and only the first one is security.
 - **Write operations.** The agent is read-only, and the connection is opened
   read-only. The moment a write capability is added, this model needs revisiting
   — human-in-the-loop approval at the graph level would be the first control.

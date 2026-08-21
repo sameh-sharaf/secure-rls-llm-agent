@@ -498,6 +498,21 @@ class SecureAgent:
 
     def _synthesise(self, state: AgentState) -> dict:
         started = time.perf_counter()
+
+        # If every tool call this turn was refused, the refusal is the answer.
+        # Asking the model to write prose with no data in hand is how a refused
+        # turn becomes a fabricated salary -- see `_refusal_answer`.
+        refusal, layer = _refusal_answer(state)
+        if refusal is not None:
+            return {
+                "answer": refusal,
+                "messages": [AIMessage(content=refusal)],
+                "trace": [
+                    step("answer", "Answered with the policy reason", status="refused",
+                         layer=layer, seconds=time.perf_counter() - started)
+                ],
+            }
+
         messages: list[AnyMessage] = [
             SystemMessage(content=system_prompt(self.session, include_policy=self.include_policy))
         ]
@@ -769,6 +784,62 @@ def _humanise_refusal(body: str) -> str:
     if not reason:
         return ""
     return f"I can't answer that: {reason[0].lower()}{reason[1:]}."
+
+
+#: Layers whose refusal is a statement of policy, and therefore worth showing.
+#: An L2 refusal means the model sent malformed arguments -- its problem, not
+#: the user's, and not something to read back to them as if it were a rule.
+_POLICY_LAYERS = ("L1", "L3", "L4", "L5")
+
+
+def _refusal_answer(state: AgentState) -> tuple[str | None, str | None]:
+    """The answer for a turn in which every tool call was refused.
+
+    Returns (answer, layer), or (None, None) when the turn is not of that shape
+    and the model should write the answer itself.
+
+    This exists because of a measured failure, not a hypothetical one. An
+    analyst asked for the highest salary; all three attempts were refused; the
+    model was then asked to write an answer with no data in hand and produced
+    "the highest salary among all employees: EUR 250,000" -- a number that does
+    not appear anywhere in the dataset. Another run answered with its own
+    tool-call syntax.
+
+    The boundary held in both cases. The failure is that a refusal with no
+    explanation leaves a silence, and a language model will fill a silence. So
+    when a turn yields refusals and nothing else, the refusal *is* the answer,
+    and the model is not asked to narrate it.
+    """
+    messages = state.get("messages", [])[state.get("turn_start", 0):]
+    tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+    if not tool_messages:
+        return None, None
+
+    refusals, useful = [], []
+    for message in tool_messages:
+        body = str(message.content or "").strip()
+        if not body:
+            continue
+        (refusals if body.startswith(("REFUSED", "BLOCKED")) else useful).append(body)
+
+    if useful or not refusals:
+        return None, None
+
+    # Prefer a real policy refusal over "you sent me bad arguments".
+    policy = [r for r in refusals if (_layer_from(r) or "").startswith(_POLICY_LAYERS)]
+    chosen = policy[-1] if policy else refusals[-1]
+    layer = _layer_from(chosen)
+
+    if not policy:
+        # Only malformed calls. Say that honestly rather than inventing a rule
+        # the user supposedly broke.
+        return (
+            "I could not build a valid query for that. Try rephrasing it — for example "
+            "\"average salary by department\", \"headcount in Sales\", or \"what the notes "
+            "say about retention\".",
+            layer,
+        )
+    return _humanise_refusal(chosen), layer
 
 
 def _fallback_from_tools(state: AgentState) -> str:
