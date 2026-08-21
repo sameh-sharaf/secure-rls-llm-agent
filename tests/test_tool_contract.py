@@ -129,3 +129,86 @@ def test_schemas_are_serialisable_for_the_demo(context: ToolContext) -> None:
         "detect_anomalies",
         "search_notes",
     }
+
+
+# ---------------------------------------------------------- custom charts ---
+# The five presets could not express "compare average salary to headcount by
+# department" -- two measures on scales three orders of magnitude apart, which
+# needs a secondary axis. Rather than add a sixth preset, the model now
+# describes the chart declaratively and the server compiles it. Generated
+# plotting code stays out of the loop: that would be a sandbox problem and a
+# route around QueryGateway, since such code could read whatever it liked.
+
+
+def test_custom_chart_combines_two_series_on_two_axes(context: ToolContext) -> None:
+    tools = {t.name: t for t in build_tools(context)}
+    out = tools["plot_chart"].invoke(
+        {
+            "x": "department",
+            "series": [
+                {"metric": "avg", "column": "salary", "mark": "bar", "axis": "left"},
+                {"metric": "count", "mark": "line", "axis": "right"},
+            ],
+        }
+    )
+    assert "REFUSED" not in out
+    figure = context.artifacts[-1].payload
+    assert [t.type for t in figure.data] == ["bar", "scatter"]
+    assert "yaxis2" in figure.layout, "second series was not put on a secondary axis"
+
+
+def test_custom_chart_is_one_query_with_k_anonymity(context: ToolContext) -> None:
+    tools = {t.name: t for t in build_tools(context)}
+    tools["plot_chart"].invoke(
+        {"x": "department", "series": [{"metric": "avg"}, {"metric": "count"}]}
+    )
+    sql = context.artifacts[-1].sql
+    assert sql.count("SELECT") == 1, "series should share a single grouped query"
+    assert "COUNT(*) >= 5" in sql
+
+
+def test_custom_chart_obeys_the_role_policy() -> None:
+    """A chart is not a way around the column policy."""
+    gw = QueryGateway(authenticate("acme_analyst", "acme123"))
+    ctx = ToolContext(gateway=gw)
+    try:
+        tools = {t.name: t for t in build_tools(ctx)}
+        blocked = tools["plot_chart"].invoke(
+            {"x": "department", "series": [{"metric": "max", "column": "salary"}]}
+        )
+        assert "REFUSED" in blocked and "one specific person" in blocked
+        allowed = tools["plot_chart"].invoke(
+            {"x": "department", "series": [{"metric": "avg", "column": "salary"}]}
+        )
+        assert "REFUSED" not in allowed
+    finally:
+        gw.close()
+
+
+def test_custom_chart_needs_a_dimension(context: ToolContext) -> None:
+    tools = {t.name: t for t in build_tools(context)}
+    out = tools["plot_chart"].invoke({"series": [{"metric": "count"}]})
+    assert "REFUSED" in out and "`x`" in out
+
+
+def test_custom_chart_caps_series_count(context: ToolContext) -> None:
+    tools = {t.name: t for t in build_tools(context)}
+    out = tools["plot_chart"].invoke(
+        {"x": "department", "series": [{"metric": "count"}] * 4}
+    )
+    assert "at most 3 series" in out
+
+
+def test_presets_still_work(context: ToolContext) -> None:
+    tools = {t.name: t for t in build_tools(context)}
+    for preset in ("salary_by_department", "headcount_by_department", "salary_distribution"):
+        out = tools["plot_chart"].invoke({"chart": preset})
+        assert "REFUSED" not in out, preset
+
+
+def test_chart_schema_still_has_no_tenant_parameter(context: ToolContext) -> None:
+    """The new fields must not have widened the contract."""
+    schema = {t.name: t for t in build_tools(context)}["plot_chart"].args_schema
+    blob = json.dumps(schema.model_json_schema()).lower()
+    for forbidden in ("tenant", "acme", "beta", "gamma", "employees_base"):
+        assert forbidden not in blob

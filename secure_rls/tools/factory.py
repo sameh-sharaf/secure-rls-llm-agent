@@ -48,6 +48,13 @@ from secure_rls.security.sql_guard import SqlRejected
 MAX_PREVIEW_ROWS = 12
 
 
+def _go():
+    """plotly.graph_objects, imported lazily to keep tool import cheap."""
+    import plotly.graph_objects as go
+
+    return go
+
+
 @dataclass
 class Artifact:
     """Something to render in the UI alongside the answer."""
@@ -137,14 +144,73 @@ class RunSqlArgs(_Base):
     )
 
 
+class Series(_Base):
+    """One measure drawn on a chart.
+
+    A typed description of *what to draw*, not code that draws it. The model
+    fills this in; the server compiles it to a query and a figure. That keeps
+    generated plotting code out of the loop entirely -- a chart tool that
+    executed model-written code would be both a sandbox problem and a way
+    around QueryGateway, since such code could read whatever it liked.
+    """
+
+    metric: Literal["count", "avg", "sum", "min", "max", "median"] = Field(
+        description="How to aggregate"
+    )
+    column: Column = Field(
+        default=Column.SALARY, description="Column to aggregate; ignored for count"
+    )
+    mark: Literal["bar", "line"] = Field(default="bar", description="Draw as bars or a line")
+    axis: Literal["left", "right"] = Field(
+        default="left",
+        description=(
+            "Which y-axis. Put measures with very different ranges on opposite axes -- "
+            "for example average salary on the left and headcount on the right."
+        ),
+    )
+    label: str | None = Field(default=None, description="Optional legend label")
+
+
 class PlotArgs(_Base):
-    chart: Literal[
-        "salary_by_department",
-        "salary_distribution",
-        "headcount_by_department",
-        "performance_vs_salary",
-        "hires_per_year",
-    ] = Field(description="Which chart to draw")
+    """Build a chart from `x` + `series`, or name one of the ready-made charts."""
+
+    # `x` and `series` come first deliberately. With the preset listed first, a
+    # model asked for a combined bar-and-line chart reached for that slot and
+    # invented `chart="bar_line"` -- a literal that does not exist -- rather
+    # than composing the chart it was asked for. Field order is part of the
+    # description the model reads, so the general path leads.
+    x: Column | None = Field(
+        default=None,
+        description=(
+            "Dimension for the horizontal axis, e.g. department. Use this with "
+            "`series` to build any chart."
+        ),
+    )
+    series: list[Series] = Field(
+        default_factory=list,
+        description=(
+            "Measures to draw against `x`. Use two or more to compare quantities on "
+            "different scales -- e.g. average salary as a bar on the left axis and "
+            "headcount as a line on the right. This is how you draw a combined "
+            "bar-and-line chart."
+        ),
+    )
+    chart: (
+        Literal[
+            "salary_by_department",
+            "salary_distribution",
+            "headcount_by_department",
+            "performance_vs_salary",
+            "hires_per_year",
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description=(
+            "Optional shortcut for one of these five exact charts. Only these values "
+            "are valid -- do not invent another. For anything else, use `x` + `series`."
+        ),
+    )
     title: str | None = Field(default=None, description="Optional chart title")
 
 
@@ -281,8 +347,100 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
         return _summarise(result)
 
     # -- charts ------------------------------------------------------------
-    def plot_chart(chart: str, title: str | None = None) -> str:
+    def _plot_custom(x: Column, series: list[Series], title: str | None) -> str:
+        """Compile a declarative chart spec into one query and one figure.
+
+        The model says *what* to draw; this decides *how*. Two measures on very
+        different scales -- average salary in the hundred-thousands, headcount
+        in the tens -- need a secondary axis or the smaller one is a flat line
+        on the floor, so `axis` is part of the spec rather than something the
+        model has to solve with code.
+
+        All series are fetched in a single grouped query, so k-anonymity, the
+        role column policy and the tenant boundary apply exactly as they do to
+        a text answer. `min`/`max` on a masked column are refused here for the
+        same reason they are refused anywhere else.
+        """
+        from plotly.subplots import make_subplots
+
+        spec = QuerySpec(
+            metrics=[
+                Metric(agg=Aggregate(s.metric), column=s.column, alias=f"s{i}")
+                for i, s in enumerate(series)
+            ],
+            group_by=[x],
+            limit=50,
+        )
+        try:
+            result = gateway.run_spec(spec, tool="plot")
+        except Exception as exc:
+            context.rejections.append(str(exc))
+            return _explain_refusal(exc)
+
+        frame = _frame(result)
+        if frame.empty:
+            return "No data to plot for your organisation."
+
+        heading = title or " and ".join(
+            s.label or f"{s.metric} {s.column.value}" for s in series
+        ) + f" by {x.value}"
+
+        needs_right = any(s.axis == "right" for s in series)
+        figure = make_subplots(specs=[[{"secondary_y": needs_right}]])
+        for i, s in enumerate(series):
+            column = f"s{i}"
+            if column not in frame:
+                continue
+            name = s.label or (
+                "headcount" if s.metric == "count" else f"{s.metric} {s.column.value}"
+            )
+            trace = (
+                _go().Bar(x=frame[x.value], y=frame[column], name=name)
+                if s.mark == "bar"
+                else _go().Scatter(
+                    x=frame[x.value], y=frame[column], name=name, mode="lines+markers"
+                )
+            )
+            figure.add_trace(trace, secondary_y=(s.axis == "right"))
+
+        figure.update_layout(title=heading, xaxis_title=x.value, legend_title=None)
+        context.artifacts.append(
+            Artifact(kind="chart", title=heading, payload=figure, sql=result.display_sql())
+        )
+        drawn = ", ".join(
+            f"{s.label or s.metric} as a {s.mark} on the {s.axis}" for s in series
+        )
+        return (
+            f"Chart '{heading}' rendered from {result.row_count} groups of your "
+            f"organisation's data ({drawn})."
+        )
+
+    def plot_chart(
+        chart: str | None = None,
+        x: Column | None = None,
+        series: list | None = None,
+        title: str | None = None,
+    ) -> str:
         import plotly.express as px
+
+        parsed = [s if isinstance(s, Series) else Series(**s) for s in (series or [])]
+        if parsed:
+            if x is None:
+                return (
+                    "REFUSED [L2 tool contract] (request policy): a custom chart needs `x`, "
+                    "the dimension to plot against -- for example department."
+                )
+            if len(parsed) > 3:
+                return (
+                    "REFUSED [L2 tool contract] (request policy): at most 3 series per chart."
+                )
+            return _plot_custom(Column(x), parsed, title)
+
+        if chart is None:
+            return (
+                "REFUSED [L2 tool contract] (request policy): choose a preset `chart`, or "
+                "give `x` and `series` for a custom chart."
+            )
 
         specs: dict[str, QuerySpec] = {
             "salary_by_department": QuerySpec(
@@ -432,7 +590,13 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
         StructuredTool.from_function(
             func=plot_chart,
             name="plot_chart",
-            description="Draw a chart of your organisation's workforce data.",
+            description=(
+                "Draw a chart of your organisation's workforce data. Use a preset "
+                "`chart` when one fits, or build a custom chart with `x` (the "
+                "dimension) and `series` (one or more measures). Combine series to "
+                "compare quantities on different scales -- put average salary as bars "
+                "on the left axis and headcount as a line on the right."
+            ),
             args_schema=PlotArgs,
         ),
         StructuredTool.from_function(

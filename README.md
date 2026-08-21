@@ -475,6 +475,14 @@ mistaken for the boundary is how systems get misjudged as safe.
   else in this README was measured.
 - **Read-only.** The moment the agent can write, this threat model needs
   revisiting — human-in-the-loop approval as a graph `interrupt` would be first.
+- **Charts are declarative, not generated.** The model describes a chart
+  (`x`, plus up to three `series` with a mark and an axis) and the server
+  compiles it into one grouped query and one Plotly figure. It never writes
+  plotting code, because executing model-written code would be both a sandbox
+  problem and a route around `QueryGateway` — such code could read whatever it
+  liked. The cost is a fixed vocabulary: bar and line marks over one dimension,
+  plus five presets for distributions. A pie chart or a facet grid is not
+  expressible without extending the spec.
 
 ---
 

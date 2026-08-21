@@ -406,7 +406,15 @@ class SecureAgent:
                 try:
                     content = tool.invoke(args)
                 except Exception as exc:  # a schema violation, e.g. an invented field
-                    content = f"REFUSED: {exc}"
+                    # A raw Pydantic traceback is a poor thing to hand a model
+                    # that has one retry left. Name the layer and restate the
+                    # fields it may use, so the next attempt has what it needs.
+                    fields = ", ".join(getattr(tool.args_schema, "model_fields", {}))
+                    content = (
+                        f"REFUSED [L2 tool contract] (invalid arguments): {exc}\n"
+                        f"Valid fields for {name}: {fields}. "
+                        f"Use only the values the schema allows; do not invent one."
+                    )
                 sql = None
                 for artifact in self.session.context.artifacts:
                     if artifact.sql:
