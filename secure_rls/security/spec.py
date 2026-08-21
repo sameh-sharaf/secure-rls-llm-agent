@@ -50,6 +50,16 @@ class Aggregate(StrEnum):
     #: the correctness suite caught the model flailing without it -- asked for a
     #: median, it selected raw salaries and gave up.
     MEDIAN = "median"
+    #: Percentiles, same mechanism as the median.
+    #:
+    #: These exist so that "what is the highest salary?" has an answer for a
+    #: role that may not read one. MAX reports exactly what the top earner is
+    #: paid; p90 describes the top of the range without being any individual's
+    #: figure. Refusing a reasonable question with no alternative is how a
+    #: policy stops being a boundary and starts being an obstacle -- and an
+    #: obstacle is what people route around.
+    P75 = "p75"
+    P90 = "p90"
 
 
 #: Aggregates that return an actual individual's value rather than a summary of
@@ -72,6 +82,9 @@ class Aggregate(StrEnum):
 #: can target, and blocking it would remove a genuinely useful statistic. That
 #: is a judgement call, and it is recorded here rather than left implicit.
 EXTREMAL_AGGREGATES = frozenset({"min", "max"})
+
+#: Aggregates the gateway computes in pandas rather than compiling to SQL.
+GATEWAY_COMPUTED = {"median": 0.5, "p75": 0.75, "p90": 0.90}
 
 
 class Operator(StrEnum):
@@ -114,8 +127,8 @@ class Metric(BaseModel):
     alias: str | None = None
 
     def sql(self) -> str:
-        if self.agg is Aggregate.MEDIAN:
-            raise SpecError("median is computed by the gateway, not compiled to SQL")
+        if self.agg.value in GATEWAY_COMPUTED:
+            raise SpecError(f"{self.agg.value} is computed by the gateway, not compiled to SQL")
         func = self.agg.value.upper()
         inner = "*" if self.agg is Aggregate.COUNT else self.column.value
         return f"{func}({inner}) AS {self.output_name()}"
@@ -221,9 +234,9 @@ def compile_spec(
         if column.value in masked_columns:
             raise tag(
                 SpecError(
-                    f"your role may not read {column.value} for individual employees; "
-                    f"ask for an aggregate instead (for example, average "
-                    f"{column.value} by department)"
+                    f"your role may not read {column.value} for individual employees. "
+                    f"You can still describe the range: p90 for the top of it, median "
+                    f"for typical, or average {column.value} by department"
                 ),
                 Layer.L1,  # the role decides; layer 3 only enforces the decision
             )
@@ -234,9 +247,10 @@ def compile_spec(
                 SpecError(
                     f"your role may not read {metric.column.value} for individual "
                     f"employees, and {metric.agg.value.upper()}({metric.column.value}) "
-                    f"reports one specific person's {metric.column.value}. Use an average "
-                    f"or a median instead, and say plainly which statistic you computed "
-                    f"-- do not present it as the {metric.agg.value}"
+                    f"reports one specific person's {metric.column.value}. For the top of "
+                    f"the range use p90, or use an average or median -- and say plainly "
+                    f"which statistic you computed, never presenting it as the "
+                    f"{metric.agg.value}"
                 ),
                 Layer.L1,
             )

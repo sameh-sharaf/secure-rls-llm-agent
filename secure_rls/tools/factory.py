@@ -122,8 +122,13 @@ class QueryEmployeesArgs(_Base):
             "do not add a count unless a count was asked for."
         ),
     )
-    metrics: list[Literal["count", "avg", "sum", "min", "max", "median"]] = Field(
-        default_factory=list, description="Aggregates to compute"
+    metrics: list[Literal["count", "avg", "sum", "min", "max", "median", "p75", "p90"]] = Field(
+        default_factory=list,
+        description=(
+            "Aggregates to compute. Use p90 for 'the highest salary' when your role "
+            "may not read an individual one -- it describes the top of the range "
+            "without being any one person's figure."
+        ),
     )
     metric_column: Column = Field(
         default=Column.SALARY, description="Column the aggregates apply to"
@@ -154,7 +159,7 @@ class Series(_Base):
     around QueryGateway, since such code could read whatever it liked.
     """
 
-    metric: Literal["count", "avg", "sum", "min", "max", "median"] = Field(
+    metric: Literal["count", "avg", "sum", "min", "max", "median", "p75", "p90"] = Field(
         description="How to aggregate"
     )
     column: Column = Field(

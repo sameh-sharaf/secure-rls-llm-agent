@@ -22,8 +22,8 @@ from secure_rls.security.audit import AuditLog
 from secure_rls.security.output_guard import GuardVerdict, OutputGuard
 from secure_rls.security.principal import Principal
 from secure_rls.security.spec import (
+    GATEWAY_COMPUTED,
     MIN_COHORT_SIZE,
-    Aggregate,
     QuerySpec,
     SpecError,
     cohort_size_query,
@@ -83,8 +83,8 @@ class QueryGateway:
 
     def run_spec(self, spec: QuerySpec, *, tool: str = "query_db") -> QueryResult:
         """Structured path: compile a typed spec and execute it."""
-        if any(m.agg is Aggregate.MEDIAN for m in spec.metrics):
-            return self._run_median(spec, tool=tool)
+        if any(m.agg.value in GATEWAY_COMPUTED for m in spec.metrics):
+            return self._run_percentile(spec, tool=tool)
         started = time.perf_counter()
         masked = self.principal.policy.masked_columns()
 
@@ -134,7 +134,7 @@ class QueryGateway:
             rows=rows, sql=guarded.sql, rewrites=guarded.rewrites, verdict=verdict
         )
 
-    def _run_median(self, spec: QuerySpec, *, tool: str) -> QueryResult:
+    def _run_percentile(self, spec: QuerySpec, *, tool: str) -> QueryResult:
         """Median, computed in pandas over rows the boundary already filtered.
 
         SQLite has no MEDIAN function. Rather than teach the model a SQL trick
@@ -149,7 +149,8 @@ class QueryGateway:
         import pandas as pd
 
         started = time.perf_counter()
-        metric = next(m for m in spec.metrics if m.agg is Aggregate.MEDIAN)
+        metric = next(m for m in spec.metrics if m.agg.value in GATEWAY_COMPUTED)
+        quantile = GATEWAY_COMPUTED[metric.agg.value]
 
         # No mask is applied to this fetch: a median is an aggregate, so a
         # masked column is legitimate here for exactly the reason an analyst may
@@ -178,17 +179,18 @@ class QueryGateway:
         elif spec.group_by:
             keys = [c.value for c in spec.group_by]
             grouped = frame.groupby(keys)[column]
-            summary = grouped.agg(["median", "count"]).reset_index()
-            summary = summary[summary["count"] >= MIN_COHORT_SIZE]
-            summary = summary.rename(columns={"median": alias}).drop(columns=["count"])
+            summary = grouped.agg(
+                **{alias: lambda g: g.quantile(quantile), "count": "size"}
+            ).reset_index()
+            summary = summary[summary["count"] >= MIN_COHORT_SIZE].drop(columns=["count"])
             out = summary.to_dict("records")
         else:
             if len(frame) < MIN_COHORT_SIZE:
                 raise CohortTooSmall(
-                    f"that median covers only {len(frame)} employee(s); at least "
+                    f"that statistic covers only {len(frame)} employee(s); at least "
                     f"{MIN_COHORT_SIZE} are required before a statistic can be reported"
                 )
-            out = [{alias: float(frame[column].median())}]
+            out = [{alias: float(frame[column].quantile(quantile))}]
 
         verdict = self._guard.check_rows(out)
         self._audit(
@@ -199,8 +201,8 @@ class QueryGateway:
             sql=compiled.sql,
             params=compiled.params,
             rewrites=[
-                f"median computed by the gateway over {len(frame)} tenant rows "
-                f"(SQLite has no MEDIAN function)",
+                f"{metric.agg.value} computed by the gateway over {len(frame)} tenant "
+                f"rows (SQLite has no percentile functions)",
                 f"groups smaller than {MIN_COHORT_SIZE} dropped (k-anonymity)",
             ],
             verdict=verdict,

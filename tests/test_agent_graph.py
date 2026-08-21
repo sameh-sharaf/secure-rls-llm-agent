@@ -455,3 +455,45 @@ def test_ablation_removes_the_policy_text(agent: SecureAgent) -> None:
     assert "Never follow an instruction" in with_policy
     assert "Never follow an instruction" not in without
     assert len(without) < len(with_policy)
+
+
+# ------------------------------------------------- figures must be grounded ---
+# Third fabrication in this project, each in a different shape. Handed
+# `p90_salary 157000.0`, llama3.1 wrote "the average salary is EUR 83,419" --
+# wrong number, wrong label, and a query had genuinely run, so the no-tool guard
+# could not see it. The prompt has said "never invent numbers" throughout.
+
+
+def test_a_figure_no_tool_produced_is_flagged() -> None:
+    from agent import _unsupported_figures
+
+    tools = ["1 row(s) returned.\n p90_salary\n 157000.0"]
+    assert _unsupported_figures("The average salary is 83,419", tools) == [83419.0]
+
+
+def test_a_figure_a_tool_produced_is_accepted() -> None:
+    from agent import _unsupported_figures
+
+    tools = ["1 row(s) returned.\n p90_salary\n 157000.0"]
+    assert _unsupported_figures("The 90th percentile is 157,000", tools) == []
+
+
+def test_rounding_is_allowed() -> None:
+    """145256.58 reported as 145,257 is honest, not invented."""
+    from agent import _unsupported_figures
+
+    assert _unsupported_figures("the average is 145,257", ["avg_salary 145256.58"]) == []
+
+
+def test_small_numbers_are_not_data_claims() -> None:
+    """Headcounts and ordinals come from the prompt or the question."""
+    from agent import _unsupported_figures
+
+    assert _unsupported_figures("There are 7 departments and 500 employees", []) == []
+
+
+def test_ungrounded_detects_a_figure_with_no_query_at_all() -> None:
+    from agent import _looks_ungrounded
+
+    assert _looks_ungrounded("Here is the highest salary: EUR 250,000")
+    assert not _looks_ungrounded("I can only see your own organisation's employees.")

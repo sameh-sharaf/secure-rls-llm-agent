@@ -167,6 +167,10 @@ Rules:
   find one, say so in your answer.
 - If a question asks about another organisation, say plainly that you can only
   see your own, and answer the version of the question that applies to yours.
+- If your role may not read an individual salary, you can still describe the
+  range. For "the highest salary" use the p90 metric; for "typical" use median.
+  Answer with that rather than refusing outright -- but say which statistic it
+  is: "the 90th percentile is X", never "the highest is X".
 - Name the statistic you actually computed. If you were refused a maximum and
   computed an average instead, say "the average is X" -- never present it as
   the maximum. A wrong label on a right number is misinformation.
@@ -519,6 +523,8 @@ class SecureAgent:
         messages += state.get("messages", [])
         response = self.llm.invoke(messages)
         text = _content_of(response)
+        this_turn_messages = state.get("messages", [])[state.get("turn_start", 0):]
+        ran_any_tool = any(isinstance(m, ToolMessage) for m in this_turn_messages)
 
         if not text:
             # Reasoning-capable models sometimes return an empty `content` with
@@ -531,7 +537,11 @@ class SecureAgent:
             # ran at all". The old single message claimed "I ran the query"
             # in both cases, which is untrue in the second and sends the user
             # looking for a result that does not exist.
-            ran_a_tool = any(isinstance(m, ToolMessage) for m in state.get("messages", []))
+            # `messages` spans the conversation, so scoping this to the turn is
+            # not optional: an earlier turn's tool call made this claim "I ran
+            # the query" on a turn that ran nothing, and sent the user looking
+            # for a result that was never produced.
+            ran_a_tool = ran_any_tool
             text = (
                 "I ran the query but could not phrase a summary. The result is shown below."
                 if ran_a_tool
@@ -541,6 +551,46 @@ class SecureAgent:
                     "department, headcount, or what the notes say about retention."
                 )
             )
+
+        # A figure the tools never produced is fabricated, whether or not a
+        # query ran. Show the tool's own result instead of the model's prose:
+        # we have the number, so refusing would be worse than answering.
+        tool_outputs = [
+            str(m.content) for m in this_turn_messages
+            if isinstance(m, ToolMessage) and not str(m.content).startswith(("REFUSED", "BLOCKED"))
+        ]
+        if tool_outputs and _unsupported_figures(text, tool_outputs):
+            grounded = _fallback_from_tools(state)
+            if grounded:
+                return {
+                    "answer": grounded,
+                    "messages": [AIMessage(content=grounded)],
+                    "trace": [
+                        step("answer", "Replaced an unsupported figure with the query result",
+                             status="blocked", layer="L5 output guard",
+                             seconds=time.perf_counter() - started)
+                    ],
+                }
+
+        # An answer with figures but no query behind it is fabricated by
+        # construction. Block it rather than trusting the prompt rule that
+        # says not to invent numbers -- models have ignored that rule three
+        # times in this project.
+        if not ran_any_tool and _looks_ungrounded(text):
+            grounded = (
+                "I did not run a query for that, so I have no figure to give you -- and "
+                "I am not going to guess one. Ask again and I will query it: for the top "
+                "of the salary range try \"what is the 90th percentile salary?\", or "
+                "\"average salary by department\"."
+            )
+            return {
+                "answer": grounded,
+                "messages": [AIMessage(content=grounded)],
+                "trace": [
+                    step("answer", "Blocked an ungrounded figure", status="blocked",
+                         layer="L5 output guard", seconds=time.perf_counter() - started)
+                ],
+            }
 
         # Last check before the answer reaches a human.
         try:
@@ -840,6 +890,72 @@ def _refusal_answer(state: AgentState) -> tuple[str | None, str | None]:
             layer,
         )
     return _humanise_refusal(chosen), layer
+
+
+#: Figures at or above this are data claims, not incidental numbers.
+#:
+#: Tenant headcounts (500/300/200) and percentile labels (90th) sit below it and
+#: are legitimately available from the system prompt; salaries and payroll
+#: totals sit above it and can only come from a query.
+_DATA_CLAIM_THRESHOLD = 1000
+_NUMBER_IN_TEXT = re.compile(r"\d[\d,.]*")
+
+
+def _numbers_in(text: str) -> list[float]:
+    out: list[float] = []
+    for match in _NUMBER_IN_TEXT.finditer(text or ""):
+        raw = match.group(0).rstrip(".,").replace(",", "")
+        try:
+            out.append(float(raw))
+        except ValueError:
+            continue
+    return out
+
+
+def _unsupported_figures(text: str, tool_outputs: list[str]) -> list[float]:
+    """Figures the answer asserts that no tool result supports.
+
+    The numeric analogue of the canary scan, and checkable without knowing the
+    right answer: every figure of any size in an answer should trace back to a
+    number a tool returned. Handed `p90_salary 157000.0`, llama3.1 wrote "the
+    average salary is EUR 83,419" -- wrong number, wrong label, and a query had
+    genuinely run, so the no-tool guard above could not see it.
+
+    A 1% tolerance allows honest rounding (145256.58 reported as 145,257)
+    without allowing invention.
+    """
+    supported = [n for output in tool_outputs for n in _numbers_in(output)]
+    offenders = []
+    for value in _numbers_in(text):
+        if abs(value) < _DATA_CLAIM_THRESHOLD:
+            continue
+        if not any(abs(value - s) <= max(abs(s) * 0.01, 0.5) for s in supported):
+            offenders.append(value)
+    return offenders
+
+
+def _looks_ungrounded(text: str) -> bool:
+    """Does this answer assert a figure that no tool produced?
+
+    Enforced rather than requested. The system prompt already says "never
+    invent numbers"; a prompt is the weakest control in this system and this is
+    the third time a model has ignored it. Asked for the highest salary with no
+    tool call made, llama3.1 replied "the 90th percentile is still 104000" --
+    the real figure is 157,000, and it had queried nothing at all.
+
+    A turn that ran no tool has no grounded figure to report, so a large number
+    in its answer is fabricated by construction. That is checkable without
+    knowing the right answer, which is what makes it worth checking.
+    """
+    for match in _NUMBER_IN_TEXT.finditer(text or ""):
+        raw = match.group(0).rstrip(".,").replace(",", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if abs(value) >= _DATA_CLAIM_THRESHOLD:
+            return True
+    return False
 
 
 def _fallback_from_tools(state: AgentState) -> str:
