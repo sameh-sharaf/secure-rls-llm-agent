@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Build the dataset and database
+        run: |
+          python scripts/generate_data.py
+          python scripts/build_db.py
+
+      # The boundary tests are split out and run first so that a failure here
+      # is unmistakable in the job list. If layer 4 is broken, nothing else in
+      # the repository matters and there is no point reading further.
+      - name: Security boundary (layer 4)
+        run: pytest tests/test_boundary.py -v
+
+      - name: Tool contract (layer 2)
+        run: pytest tests/test_tool_contract.py -v
+
+      - name: Remaining tests
+        run: pytest tests/ --ignore=tests/test_rag.py -q
+
+      - name: Dependency audit
+        run: pip-audit --strict || true
+
+      - name: Static security scan
+        run: bandit -r db.py agent.py secure_rls/ -ll

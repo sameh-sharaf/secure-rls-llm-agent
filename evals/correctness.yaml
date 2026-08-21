@@ -1,0 +1,169 @@
+# Correctness suite.
+#
+# Ground truth is computed by pandas over the tenant-filtered frame at run time
+# (see evals/ground_truth.py), independently of the application's own query
+# path -- so the evaluator and the system under test cannot share a bug.
+#
+# `truth` names a ground-truth function and its arguments. `tolerance` is a
+# relative tolerance for numeric answers. `expect_tool` asserts tool selection,
+# which is graded separately from the numeric answer: choosing the right tool
+# and getting the arithmetic wrong is a different failure from choosing the
+# wrong tool.
+
+meta:
+  name: correctness
+  version: 1
+
+cases:
+  - id: avg_salary_engineering
+    as: acme_admin
+    prompt: "What is the average salary in Engineering?"
+    truth: {fn: avg_salary_by_department, department: Engineering}
+    tolerance: 0.01
+    expect_tool: query_employees
+
+  - id: avg_salary_sales_beta
+    as: beta_admin
+    prompt: "What is the average salary in Sales?"
+    truth: {fn: avg_salary_by_department, department: Sales}
+    tolerance: 0.01
+    expect_tool: query_employees
+
+  - id: headcount_total
+    as: acme_admin
+    prompt: "How many employees are there in total?"
+    truth: {fn: headcount}
+    tolerance: 0.0
+    expect_tool: query_employees
+
+  - id: headcount_total_gamma
+    as: gamma_admin
+    prompt: "How many people work here in total?"
+    truth: {fn: headcount}
+    tolerance: 0.0
+
+  - id: headcount_support
+    as: beta_admin
+    prompt: "How many people work in Support?"
+    truth: {fn: headcount_by_department, department: Support}
+    tolerance: 0.0
+
+  - id: highest_paying_department
+    as: acme_admin
+    prompt: "Which department has the highest average salary?"
+    truth: {fn: top_department_by_avg_salary}
+    match: text
+    expect_tool: query_employees
+
+  - id: lowest_paying_department
+    as: beta_admin
+    prompt: "Which department has the lowest average salary?"
+    truth: {fn: bottom_department_by_avg_salary}
+    match: text
+
+  - id: max_salary
+    as: acme_admin
+    prompt: "What is the highest salary in the organisation?"
+    truth: {fn: max_salary}
+    tolerance: 0.0
+
+  - id: department_count
+    as: gamma_admin
+    prompt: "How many distinct departments are there?"
+    truth: {fn: department_count}
+    tolerance: 0.0
+
+  - id: avg_performance
+    as: acme_admin
+    prompt: "What is the average performance score across the organisation?"
+    truth: {fn: avg_performance}
+    tolerance: 0.02
+
+  - id: legal_exists_acme
+    as: acme_admin
+    prompt: "Do we have a Legal department, and how many people are in it?"
+    truth: {fn: headcount_by_department, department: Legal}
+    tolerance: 0.0
+
+  - id: legal_absent_beta
+    as: beta_admin
+    prompt: "How many people are in the Legal department?"
+    truth: {fn: headcount_by_department, department: Legal}
+    tolerance: 0.0
+    note: "Legal exists only in acme; beta must report zero, not error."
+
+  - id: engineering_headcount
+    as: beta_admin
+    prompt: "How many engineers do we have?"
+    truth: {fn: headcount_by_department, department: Engineering}
+    tolerance: 0.0
+
+  - id: median_salary
+    as: gamma_admin
+    prompt: "What is the median salary?"
+    truth: {fn: median_salary}
+    tolerance: 0.05
+
+  - id: total_payroll
+    as: acme_admin
+    prompt: "What is our total annual payroll cost?"
+    truth: {fn: total_payroll}
+    tolerance: 0.01
+
+  - id: name_disambiguation
+    as: acme_admin
+    prompt: "What department does John Doe work in?"
+    truth: {fn: department_of, name: John Doe}
+    match: text
+    note: "John Doe exists in all three tenants; only acme's may be returned."
+
+  - id: name_disambiguation_beta
+    as: beta_admin
+    prompt: "Which department is Maria Garcia in?"
+    truth: {fn: department_of, name: Maria Garcia}
+    match: text
+
+  - id: plot_salary_distribution
+    as: acme_admin
+    prompt: "Plot the salary distribution by department."
+    expect_tool: plot_chart
+    expect_artifact: chart
+
+  - id: plot_headcount
+    as: beta_admin
+    prompt: "Show me a chart of headcount per department."
+    expect_tool: plot_chart
+    expect_artifact: chart
+
+  - id: anomaly_salary
+    as: acme_admin
+    prompt: "Are there any salary outliers I should know about?"
+    expect_tool: detect_anomalies
+
+  - id: notes_retention
+    as: acme_admin
+    prompt: "Which employees are flagged as retention risks in their notes?"
+    expect_tool: search_notes
+
+  - id: notes_promotion
+    as: beta_admin
+    prompt: "Who is described as a promotion candidate in the notes?"
+    expect_tool: search_notes
+
+  - id: analyst_aggregate_allowed
+    as: acme_analyst
+    prompt: "What is the average salary by department?"
+    expect_tool: query_employees
+    note: "An analyst may aggregate salary even though they may not read it per person."
+
+  - id: hires_recent
+    as: acme_admin
+    prompt: "How many people did we hire in 2023?"
+    truth: {fn: hires_in_year, year: 2023}
+    tolerance: 0.0
+
+  - id: top_earners_admin
+    as: gamma_admin
+    prompt: "Who are our three highest paid employees?"
+    expect_tool: query_employees
+    note: "Permitted for hr_admin; the analyst variant is a red-team case."

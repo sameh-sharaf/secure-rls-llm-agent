@@ -1,0 +1,53 @@
+# One command to a running demo:
+#
+#   docker compose up --build
+#   docker compose exec app python -m evals.runner --suite redteam
+#
+# The model runs in a sibling container, so nothing leaves the machine. That is
+# a requirement of the brief, not a preference: an agent over HR data has no
+# business posting rows to a hosted API during an evaluation.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Pulls the model once, then exits. Keeps the app's start-up honest: the app
+  # does not begin until the weights are actually present.
+  model-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      MODEL: ${SECURE_RLS_MODEL:-llama3.1:8b}
+    entrypoint: ["/bin/sh", "-c", "ollama pull \"$${MODEL}\""]
+    restart: "no"
+
+  app:
+    build: .
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      SECURE_RLS_MODEL: ${SECURE_RLS_MODEL:-llama3.1:8b}
+    ports:
+      - "8501:8501"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  ollama-models:

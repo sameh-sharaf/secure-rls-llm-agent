@@ -1,0 +1,68 @@
+name: deploy
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image ships with the database and indexes already built, so this
+      # verifies the security boundary inside the artefact that actually gets
+      # deployed -- not just in the source tree that produced it.
+      - name: Smoke-test the published image
+        run: |
+          docker run --rm ghcr.io/${{ github.repository }}:sha-$(git rev-parse --short HEAD) \
+            python -m pytest tests/test_boundary.py tests/test_tool_contract.py -q
+
+  # Deliberately not wired to a live environment. A 7B model needs hardware that
+  # free tiers do not provide, and swapping in a hosted API to get a public URL
+  # would contradict the offline requirement in the brief. The manifest below is
+  # the documented production path; see README "Known limitations".
+  azure-container-apps:
+    if: false
+    runs-on: ubuntu-latest
+    needs: image
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - uses: azure/container-apps-deploy-action@v2
+        with:
+          containerAppName: secure-rls
+          resourceGroup: ${{ vars.AZURE_RESOURCE_GROUP }}
+          imageToDeploy: ghcr.io/${{ github.repository }}:latest
