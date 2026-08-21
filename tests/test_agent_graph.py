@@ -141,6 +141,16 @@ def test_no_tool_output_yields_no_fallback() -> None:
     assert _fallback_from_tools({"messages": [AIMessage(content="")]}) == ""
 
 
+def test_fallback_ignores_empty_tool_messages() -> None:
+    state = {
+        "messages": [
+            ToolMessage(content="", tool_call_id="1"),
+            ToolMessage(content="12 row(s) returned.", tool_call_id="2"),
+        ]
+    }
+    assert _fallback_from_tools(state).startswith("12 row(s)")
+
+
 # ---------------------------------------------------------------- router ---
 
 @pytest.mark.parametrize(

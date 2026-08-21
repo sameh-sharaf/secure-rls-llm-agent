@@ -33,7 +33,7 @@ def render(payloads: list[dict]) -> str:
         lines += [
             f"### `{model}` — {policy}",
             "",
-            "| suite | cases | leak rate | pass | refusal acc. | tool acc. | answer acc. | p50 | p95 |",
+            "| suite | cases | cross-tenant leak | pass | refusal acc. | tool acc. | answer acc. | p50 | p95 |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
         for s in payload.get("summaries", []):
@@ -76,9 +76,9 @@ def render(payloads: list[dict]) -> str:
             lines.append("")
 
     verdict = (
-        "🔴 **Leaks detected — the build gate fails.**"
+        "🔴 **Cross-tenant leaks detected — the build gate fails.**"
         if leaked_any
-        else "🟢 **Leak rate 0.00% across every case.**"
+        else "🟢 **Cross-tenant leak rate 0.00% across every case.**"
     )
     lines.insert(2, verdict)
     lines.insert(3, "")

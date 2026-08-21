@@ -1,0 +1,104 @@
+[
+  {
+    "model": "llama3.1:8b",
+    "suites": {
+      "redteam": {
+        "suite": "redteam",
+        "cases": 50,
+        "passed": 45,
+        "pass_rate": 90.0,
+        "leaks": 0,
+        "leak_rate": 0.0,
+        "errors": 0,
+        "refusal_accuracy": 68.8,
+        "tool_accuracy": null,
+        "answer_accuracy": null,
+        "p50_seconds": 3.4,
+        "p95_seconds": 8.9
+      },
+      "correctness": {
+        "suite": "correctness",
+        "cases": 25,
+        "passed": 20,
+        "pass_rate": 80.0,
+        "leaks": 0,
+        "leak_rate": 0.0,
+        "errors": 0,
+        "refusal_accuracy": null,
+        "tool_accuracy": 100.0,
+        "answer_accuracy": 72.2,
+        "p50_seconds": 2.6,
+        "p95_seconds": 4.7
+      }
+    },
+    "wall_minutes": 4.7
+  },
+  {
+    "model": "qwen2.5:7b",
+    "suites": {
+      "redteam": {
+        "suite": "redteam",
+        "cases": 50,
+        "passed": 47,
+        "pass_rate": 94.0,
+        "leaks": 0,
+        "leak_rate": 0.0,
+        "errors": 0,
+        "refusal_accuracy": 81.2,
+        "tool_accuracy": null,
+        "answer_accuracy": null,
+        "p50_seconds": 3.3,
+        "p95_seconds": 9.8
+      },
+      "correctness": {
+        "suite": "correctness",
+        "cases": 25,
+        "passed": 21,
+        "pass_rate": 84.0,
+        "leaks": 0,
+        "leak_rate": 0.0,
+        "errors": 0,
+        "refusal_accuracy": null,
+        "tool_accuracy": 100.0,
+        "answer_accuracy": 77.8,
+        "p50_seconds": 2.6,
+        "p95_seconds": 10.7
+      }
+    },
+    "wall_minutes": 5.2
+  },
+  {
+    "model": "gemma4:26b-a4b-it-q4_K_M",
+    "suites": {
+      "redteam": {
+        "suite": "redteam",
+        "cases": 50,
+        "passed": 50,
+        "pass_rate": 100.0,
+        "leaks": 0,
+        "leak_rate": 0.0,
+        "errors": 0,
+        "refusal_accuracy": 100.0,
+        "tool_accuracy": null,
+        "answer_accuracy": null,
+        "p50_seconds": 28.3,
+        "p95_seconds": 47.5
+      },
+      "correctness": {
+        "suite": "correctness",
+        "cases": 25,
+        "passed": 25,
+        "pass_rate": 100.0,
+        "leaks": 0,
+        "leak_rate": 0.0,
+        "errors": 0,
+        "refusal_accuracy": null,
+        "tool_accuracy": 100.0,
+        "answer_accuracy": 100.0,
+        "p50_seconds": 10.7,
+        "p95_seconds": 19.1
+      }
+    },
+    "wall_minutes": 26.4
+  }
+]

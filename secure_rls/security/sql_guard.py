@@ -132,13 +132,31 @@ def _check_functions(tree: exp.Expression) -> None:
 
 
 def _check_masked_columns(tree: exp.Expression, masked: frozenset[str]) -> bool:
-    """Enforce the role's column policy, allowing aggregate use of masked columns.
+    """Enforce the role's column policy on model-written SQL.
 
     An analyst may ask for the average salary; they may not list salaries next
-    to names. The distinction is whether the column appears inside an aggregate.
+    to names. The obvious rule -- "allowed inside any aggregate" -- is not quite
+    right, and the model bake-off found the gap: `SELECT MAX(salary)` is an
+    aggregate by syntax and a single individual's pay by content. MIN and MAX
+    select one row's value rather than combining many, so they are treated as
+    row-level reads of a masked column. See EXTREMAL_AGGREGATES in spec.py.
     """
     if not masked:
         return False
+
+    # A masked column inside MIN()/MAX() discloses one person, so reject it
+    # before the more permissive aggregate rule below can wave it through.
+    for node in tree.find_all(exp.Min, exp.Max):
+        for column in node.find_all(exp.Column):
+            name = (column.name or "").lower()
+            if name in masked:
+                verb = node.__class__.__name__.upper()
+                _fail(
+                    f"your role may not read {name} for individual employees, and "
+                    f"{verb}({name}) reports one specific person's {name}. "
+                    f"Use AVG({name}) or a median instead"
+                )
+
     aggregate_nodes = tuple(tree.find_all(exp.AggFunc))
     for column in tree.find_all(exp.Column):
         name = (column.name or "").lower()

@@ -145,6 +145,63 @@ def test_analyst_can_aggregate_salary(acme_analyst: QueryGateway) -> None:
     assert result.row_count > 0
 
 
+# -- extremal aggregates ----------------------------------------------------
+# Found by the model bake-off, not by design review: an analyst barred from
+# reading individual salaries asked "who is the highest paid person", and
+# qwen2.5 answered "999,999 EUR" via MAX(). The tenant boundary held; the role
+# boundary did not, and the leak-rate metric was blind to it because it only
+# measures cross-tenant disclosure.
+
+
+@pytest.mark.parametrize("agg", ["max", "min"])
+def test_analyst_cannot_reach_an_individual_salary_through_min_or_max(
+    acme_analyst: QueryGateway, agg: str
+) -> None:
+    from secure_rls.security.spec import Aggregate, Metric
+
+    with pytest.raises(Exception, match="one specific person"):
+        acme_analyst.run_spec(
+            QuerySpec(metrics=[Metric(agg=Aggregate(agg), column=Column.SALARY)])
+        )
+
+
+@pytest.mark.parametrize("agg", ["MAX", "MIN"])
+def test_min_max_blocked_on_the_sql_path_too(acme_analyst: QueryGateway, agg: str) -> None:
+    with pytest.raises(SqlRejected, match="one specific person"):
+        acme_analyst.run_sql(f"SELECT {agg}(salary) AS m FROM employees")
+
+
+def test_analyst_can_still_use_combining_aggregates(acme_analyst: QueryGateway) -> None:
+    """AVG, SUM, COUNT and MEDIAN combine many values; MIN and MAX select one."""
+    from secure_rls.security.spec import Aggregate, Metric
+
+    for agg in (Aggregate.AVG, Aggregate.SUM, Aggregate.COUNT, Aggregate.MEDIAN):
+        result = acme_analyst.run_spec(
+            QuerySpec(metrics=[Metric(agg=agg, column=Column.SALARY)])
+        )
+        assert result.rows
+
+
+def test_admin_may_still_use_min_and_max(acme_admin: QueryGateway) -> None:
+    """The rule is a role policy, not a blanket ban on extremal aggregates."""
+    from secure_rls.security.spec import Aggregate, Metric
+
+    result = acme_admin.run_spec(
+        QuerySpec(metrics=[Metric(agg=Aggregate.MAX, column=Column.SALARY)])
+    )
+    assert result.rows[0]["max_salary"] == 999999
+
+
+def test_unmasked_columns_are_unaffected(acme_analyst: QueryGateway) -> None:
+    """Only masked columns get the extremal restriction."""
+    from secure_rls.security.spec import Aggregate, Metric
+
+    result = acme_analyst.run_spec(
+        QuerySpec(metrics=[Metric(agg=Aggregate.MAX, column=Column.PERFORMANCE_SCORE)])
+    )
+    assert result.rows
+
+
 def test_admin_can_read_individual_salary(acme_admin: QueryGateway) -> None:
     result = acme_admin.run_spec(QuerySpec(select=[Column.NAME, Column.SALARY], limit=5))
     assert all("salary" in r for r in result.rows)

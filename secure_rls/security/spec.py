@@ -50,6 +50,28 @@ class Aggregate(StrEnum):
     MEDIAN = "median"
 
 
+#: Aggregates that return an actual individual's value rather than a summary of
+#: many, and therefore disclose that individual.
+#:
+#: This distinction is not the same as k-anonymity and is not covered by it.
+#: MAX(salary) over a cohort of five hundred passes every cohort-size check and
+#: still reports exactly what the top earner is paid -- and "the top earner" is
+#: a salient, targetable identity. AVG, SUM and COUNT combine values; MIN and
+#: MAX select one.
+#:
+#: Found by the model bake-off: an analyst barred from reading individual
+#: salaries asked for the highest paid person, and qwen2.5 correctly answered
+#: "999,999 EUR" by way of MAX(). The tenant boundary held throughout -- this is
+#: a *role* boundary failure, and the leak-rate metric was blind to it because
+#: it only ever measured cross-tenant disclosure.
+#:
+#: MEDIAN is deliberately not in this set. On an odd-sized cohort it can equal
+#: some individual's value, but "the median earner" is not an identity anyone
+#: can target, and blocking it would remove a genuinely useful statistic. That
+#: is a judgement call, and it is recorded here rather than left implicit.
+EXTREMAL_AGGREGATES = frozenset({"min", "max"})
+
+
 class Operator(StrEnum):
     EQ = "="
     NE = "!="
@@ -190,6 +212,14 @@ def compile_spec(
             raise SpecError(
                 f"your role may not read {column.value} for individual employees; "
                 f"ask for an aggregate instead (for example, average {column.value} by department)"
+            )
+
+    for metric in spec.metrics:
+        if metric.column.value in masked_columns and metric.agg.value in EXTREMAL_AGGREGATES:
+            raise SpecError(
+                f"your role may not read {metric.column.value} for individual employees, and "
+                f"{metric.agg.value.upper()}({metric.column.value}) reports one specific "
+                f"person's {metric.column.value}. Use an average or a median instead"
             )
 
     projections: list[str] = [c.value for c in spec.group_by]

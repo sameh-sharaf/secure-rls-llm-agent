@@ -432,8 +432,21 @@ class SecureAgent:
             # everything in a thinking field. Rather than show a blank answer,
             # fall back to the last tool result -- the grounded data the user
             # asked for, or the policy reason they were refused.
-            text = _fallback_from_tools(state) or (
+            text = _fallback_from_tools(state)
+        if not text:
+            # Distinguish "a tool ran and I cannot summarise it" from "no tool
+            # ran at all". The old single message claimed "I ran the query"
+            # in both cases, which is untrue in the second and sends the user
+            # looking for a result that does not exist.
+            ran_a_tool = any(isinstance(m, ToolMessage) for m in state.get("messages", []))
+            text = (
                 "I ran the query but could not phrase a summary. The result is shown below."
+                if ran_a_tool
+                else (
+                    "I could not answer that. Try rephrasing it as a question about your "
+                    "organisation's workforce data -- for example, average salary by "
+                    "department, headcount, or what the notes say about retention."
+                )
             )
 
         # Last check before the answer reaches a human.
