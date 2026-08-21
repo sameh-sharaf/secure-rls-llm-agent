@@ -111,6 +111,10 @@ python -m evals.ablation
   by default; `tenant_connection` passes `check_same_thread=False` and
   `TenantDatabase` serialises statements behind a lock instead. Single-threaded
   tests and CLI runs cannot catch this class -- run the app.
+- **`messages` spans the whole conversation; a turn does not.** Anything
+  answering "what happened in *this* turn" must slice from `state["turn_start"]`.
+  The empty-answer fallback did not, and served a previous question's result as
+  the current answer -- same tenant, authorised rows, entirely the wrong answer.
 - **Monkeypatch where the name is *looked up*, not where it is defined.**
   `gateway.py` does `from ...sql_guard import guard_sql`, so patching
   `sql_guard.guard_sql` changes nothing the gateway calls. The ablation harness

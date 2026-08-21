@@ -136,6 +136,12 @@ class AgentState(TypedDict, total=False):
     attempts: int
     rejections: Annotated[list[str], merge_reasons]
     trace: Annotated[list[dict], merge_steps]
+    #: Index into `messages` where the current turn begins.
+    #:
+    #: `messages` spans the whole conversation -- that is the memory. Anything
+    #: that answers "what happened in *this* turn" has to say where the turn
+    #: started, or it will happily reach back into an earlier one.
+    turn_start: int
     refusal_reason: str
     answer: str
 
@@ -276,6 +282,9 @@ class SecureAgent:
     def _route(self, state: AgentState) -> dict:
         question = state["question"]
         tenant = self.session.principal.tenant_id
+        # The human message for this turn is already in state, so everything
+        # from here on belongs to this turn.
+        turn_start = len(state.get("messages", []))
         # `route` is always the first node of a turn, so this is where per-turn
         # accumulators are cleared. Messages deliberately survive -- that is the
         # conversation memory.
@@ -287,6 +296,7 @@ class SecureAgent:
                     "I only answer questions about your organisation's workforce data."
                 ),
                 "rejections": ["__reset__"],
+                "turn_start": turn_start,
                 "trace": fresh + [step("refuse", "Out of scope", status="refused", layer="L1 identity & role policy")],
             }
 
@@ -300,6 +310,7 @@ class SecureAgent:
                     "your own organisation and I will answer it."
                 ),
                 "rejections": ["__reset__"],
+                "turn_start": turn_start,
                 "trace": fresh
                 + [
                     step(
@@ -323,6 +334,7 @@ class SecureAgent:
                     "organisation and I will answer it."
                 ),
                 "rejections": ["__reset__"],
+                "turn_start": turn_start,
                 "trace": fresh + [step("refuse", "Request spans organisations", status="refused",
                               layer="L1 identity & role policy")],
             }
@@ -340,6 +352,7 @@ class SecureAgent:
             # node that runs on every turn, which makes it the right place to
             # reset per-turn state.
             "refusal_reason": "",
+            "turn_start": turn_start,
             "rejections": ["__reset__"],
             "trace": fresh + [step("route", "In scope", status="ok")],
         }
@@ -406,14 +419,12 @@ class SecureAgent:
                 try:
                     content = tool.invoke(args)
                 except Exception as exc:  # a schema violation, e.g. an invented field
-                    # A raw Pydantic traceback is a poor thing to hand a model
-                    # that has one retry left. Name the layer and restate the
-                    # fields it may use, so the next attempt has what it needs.
-                    fields = ", ".join(getattr(tool.args_schema, "model_fields", {}))
+                    # A raw Pydantic dump is a poor thing to hand a model that
+                    # has one retry left, and a worse thing to show a user if it
+                    # becomes the answer. Turn it into a sentence.
                     content = (
-                        f"REFUSED [L2 tool contract] (invalid arguments): {exc}\n"
-                        f"Valid fields for {name}: {fields}. "
-                        f"Use only the values the schema allows; do not invent one."
+                        f"REFUSED [L2 tool contract] (invalid arguments): "
+                        f"{_explain_validation(exc, name, tool)}"
                     )
                 sql = None
                 for artifact in self.session.context.artifacts:
@@ -670,6 +681,41 @@ def _content_of(response: Any) -> str:
     return ""
 
 
+def _explain_validation(exc: Exception, tool_name: str, tool: Any) -> str:
+    """Turn a Pydantic ValidationError into something a person can read.
+
+    Worth the effort because this message has two audiences that both matter:
+    the model, which gets one retry and needs to know what to change, and the
+    user, who sees it if the retry also fails. "1 validation error for
+    QueryEmployeesArgs / select.0 / literal_error" serves neither.
+
+    The common case here is the model naming a column that does not exist --
+    `tenant_id` above all, which is the tool contract doing its job. Saying so
+    plainly beats a traceback.
+    """
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return str(exc)
+
+    parts: list[str] = []
+    for err in errors():
+        where = ".".join(str(p) for p in err.get("loc", ()) if not isinstance(p, int))
+        given = err.get("input")
+        if err.get("type") in {"literal_error", "enum"}:
+            allowed = err.get("ctx", {}).get("expected", "")
+            parts.append(
+                f"{given!r} is not an accepted value for `{where}`"
+                + (f"; allowed values are {allowed}" if allowed else "")
+            )
+        elif err.get("type") == "extra_forbidden":
+            parts.append(f"`{where}` is not a parameter of {tool_name}")
+        else:
+            parts.append(f"`{where}`: {err.get('msg', 'invalid value')}")
+
+    fields = ", ".join(getattr(tool.args_schema, "model_fields", {}))
+    return "; ".join(parts) + f". Parameters of {tool_name}: {fields}."
+
+
 _REFUSAL_PREFIX = re.compile(r"^(REFUSED|BLOCKED)\s*(\[[^\]]*\])?\s*(\([^)]*\))?:\s*", re.I)
 _LAYER_IN_MESSAGE = re.compile(r"^(?:REFUSED|BLOCKED)\s*\[([^\]]+)\]", re.I)
 
@@ -705,7 +751,12 @@ def _fallback_from_tools(state: AgentState) -> str:
     over-blocking is a failure mode we claim to measure.
     """
     refusal = ""
-    for message in reversed(state.get("messages", [])):
+    # Only this turn's messages. Walking the whole history let a previous
+    # question's result be served as the answer to the current one -- same
+    # tenant, already-authorised rows, and completely the wrong answer.
+    messages = state.get("messages", [])
+    messages = messages[state.get("turn_start", 0):]
+    for message in reversed(messages):
         if not isinstance(message, ToolMessage):
             continue
         body = str(message.content or "").strip()

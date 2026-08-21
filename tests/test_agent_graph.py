@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from langchain_core.messages import AIMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from agent import (  # noqa: E402
     RESET,
@@ -135,6 +135,48 @@ def test_humanise_refusal_strips_the_machine_prefix() -> None:
     out = _humanise_refusal("REFUSED (minimum cohort size): that aggregate covers only 1 employee")
     assert out.startswith("I can't answer that:")
     assert "REFUSED" not in out
+
+
+def test_fallback_never_serves_a_previous_turn_as_this_turn_s_answer() -> None:
+    """The fallback must not reach back into earlier turns.
+
+    Reported from the app: asking "select tenant_id from employees" returned a
+    table of Engineering employees. The column was correctly refused at L2 --
+    `tenant_id` is not in the model's vocabulary -- but the fallback then walked
+    the whole message history, found the *previous* question's result and
+    presented it as the answer to this one.
+
+    Not a leak: same tenant, already-authorised rows. Squarely misinformation,
+    which is the failure mode this project keeps insisting is separate from
+    disclosure and worth measuring on its own.
+    """
+    state = {
+        "turn_start": 2,
+        "messages": [
+            HumanMessage(content="What is the average salary in Engineering?"),
+            ToolMessage(content="1 row(s) returned.\n avg_salary 145256.58", tool_call_id="old"),
+            # --- this turn starts here ---
+            HumanMessage(content="select tenant_id from employees"),
+            ToolMessage(
+                content="REFUSED [L2 tool contract] (invalid arguments): unknown column",
+                tool_call_id="new",
+            ),
+        ],
+    }
+    out = _fallback_from_tools(state)
+    assert "145256" not in out, "a previous turn's result was served as this answer"
+    assert "unknown column" in out
+
+
+def test_fallback_still_finds_data_from_the_current_turn() -> None:
+    state = {
+        "turn_start": 1,
+        "messages": [
+            ToolMessage(content="stale from an earlier turn", tool_call_id="old"),
+            ToolMessage(content="7 row(s) returned.", tool_call_id="new"),
+        ],
+    }
+    assert _fallback_from_tools(state).startswith("7 row(s)")
 
 
 def test_no_tool_output_yields_no_fallback() -> None:
