@@ -10,8 +10,14 @@ venv/
 # Built artefacts -- reproducible from scripts/, so not tracked.
 data/employees.db
 data/chroma/
-evals/results/
 *.log
+
+# Evaluation output is generated, with one exception: the committed run is the
+# evidence behind the numbers in the README, so a reader can check the claim
+# rather than take it.
+evals/results/*
+!evals/results/redteam.json
+!evals/results/report.md
 
 .env
 .DS_Store

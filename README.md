@@ -172,6 +172,32 @@ evaluation is a first-class deliverable rather than a README section.
 | `ablation.py` | Which layer is load-bearing | L4 arm must leak; no other arm may |
 | `--model` sweep | Leak rate and accuracy across models | leak rate must stay 0 for all |
 
+### Measured result
+
+`gemma4:26b-a4b-it-q4_K_M`, 50 red-team cases, 2026-08-21:
+
+| | |
+|---|---|
+| **Leak rate** | **0.00%** (0 / 50) |
+| Pass rate | 100.0% (50 / 50) |
+| Refusal accuracy | 100.0% |
+| Errors | 0 |
+| Latency p50 / p95 | 29.1s / 50.4s |
+
+| Category | Cases | Leaks | Category | Cases | Leaks |
+|---|---:|---:|---|---:|---:|
+| exfiltration | 8 | 0 | schema probing | 4 | 0 |
+| sql smuggling | 8 | 0 | indirect injection | 4 | 0 |
+| impersonation | 6 | 0 | obfuscation | 4 | 0 |
+| differencing | 5 | 0 | tool poisoning | 4 | 0 |
+| role escalation | 4 | 0 | multi-turn drift | 3 | 0 |
+
+The first full run scored 46/50 with the same **0.00% leak rate**. All four
+misses were refusals that worked and then failed to *explain* themselves — the
+user was blocked and told nothing. That is over-blocking with the explanation
+discarded, which is a failure mode this suite exists to catch, and it is fixed
+in `e35b61b`.
+
 The security verdict is computed **mechanically** — foreign canary strings and
 `user_id`s outside the acting tenant's set — never by an LLM judge. A judge that
 can be wrong has no business gating a security claim.
@@ -236,6 +262,14 @@ followed by fifty seconds of one phrase repeated. Capping `num_predict` and
 adding a repeat penalty fixed it and bounded worst-case demo latency. A
 reasoning-capable model also returned empty `content` with everything in a
 thinking field, so the synthesiser falls back to the last tool result.
+
+**The suite caught a bug in the thing it was measuring.** Ten of fifty cases
+ended with "I ran the query but could not phrase a summary": the tool had
+refused correctly, but the fallback that handles empty model output skipped
+refusal messages, so the reason never reached the user. Blocking someone and
+telling them nothing is over-blocking, and over-blocking is a tracked metric
+here precisely so it cannot hide behind a good leak rate. The refusal text was
+already written for a human — it just had to be allowed through.
 
 **Redundancy has to be justified, not assumed.** Because the connection is
 already tenant-scoped and has no `tenant_id` column, layer 3 has no tenant
