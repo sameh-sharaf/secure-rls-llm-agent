@@ -302,7 +302,7 @@ label is wrong.
 
 That is misinformation, not disclosure, and it is worth separating carefully
 because a naive audit conflates them. Scanning answers for "any number matching
-a real salary" flags acme's median of €117,500 — which is both a legitimate
+a real salary" flags acme's median salary — which is both a legitimate
 aggregate *and* several employees' actual pay, because salaries are rounded to
 the nearest 500. A role-leak metric built that way would fire constantly on
 correct behaviour, and a metric that cries wolf gets ignored exactly when it
