@@ -109,6 +109,11 @@ def render(rows: list[dict]) -> str:
 
 
 def main() -> int:
+    # Windows consoles default to cp1252 and cannot encode the status emoji.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument(

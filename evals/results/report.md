@@ -8,6 +8,12 @@
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | redteam | 50 | 🟢 **0.00%** | 100.0% | 100.0% | — | — | 29.1s | 50.4s |
 
+### `gemma4:26b-a4b-it-q4_K_M` — with policy prompt
+
+| suite | cases | leak rate | pass | refusal acc. | tool acc. | answer acc. | p50 | p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| correctness | 25 | 🟢 **0.00%** | 100.0% | — | 100.0% | 100.0% | 10.5s | 19.2s |
+
 ### Red team by category
 
 | category | cases | leaks | passed |

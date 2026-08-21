@@ -86,6 +86,15 @@ def render(payloads: list[dict]) -> str:
 
 
 def main() -> int:
+    # The report contains status emoji, and Windows consoles default to cp1252,
+    # which cannot encode them -- so printing the report raised
+    # UnicodeEncodeError locally while working fine in CI. Reconfigure rather
+    # than drop the emoji: the report's main destination is a GitHub job
+    # summary, where they carry the leak verdict at a glance.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     paths = [Path(p) for p in sys.argv[1:]] or sorted(RESULTS.glob("*.json"))
     paths = [p for p in paths if p.exists() and p.name != "report.json"]
     if not paths:
