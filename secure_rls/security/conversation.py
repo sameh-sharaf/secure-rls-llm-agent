@@ -57,6 +57,14 @@ class Turn:
     answer: str
     trace: list[dict] = field(default_factory=list)
     timestamp: float = 0.0
+    #: Which model produced this answer.
+    #:
+    #: Worth recording because the model can be switched mid-conversation, and
+    #: the bake-off showed answer accuracy ranging from 72% to 100% across the
+    #: three local models. A transcript where half the turns came from a weaker
+    #: model and half from a stronger one, with no way to tell which, is a
+    #: transcript you cannot judge.
+    model: str = ""
 
 
 class ConversationStore:
@@ -83,14 +91,31 @@ class ConversationStore:
                     ts        REAL NOT NULL,
                     question  TEXT NOT NULL,
                     answer    TEXT NOT NULL,
-                    trace     TEXT NOT NULL
+                    trace     TEXT NOT NULL,
+                    model     TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            self._migrate(conn)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_owner ON turns(tenant_id, username, role, id)"
             )
             conn.commit()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns a database created by an earlier version is missing.
+
+        The store is local and gitignored, so this could reasonably be "delete
+        the file". It is not, because the whole point of persisting a
+        transcript is that it survives -- silently dropping someone's history
+        to add a column would undercut the feature it is extending.
+        """
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(turns)")}
+        for column, ddl in (("model", "TEXT NOT NULL DEFAULT ''"),):
+            if column not in existing:
+                conn.execute(f"ALTER TABLE turns ADD COLUMN {column} {ddl}")
+        conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
         # Same thread caveat as db.py: Streamlit reruns land on pool threads.
@@ -100,12 +125,20 @@ class ConversationStore:
 
     # ------------------------------------------------------------ writing ---
 
-    def append(self, principal: Principal, question: str, answer: str, trace: list[dict]) -> None:
+    def append(
+        self,
+        principal: Principal,
+        question: str,
+        answer: str,
+        trace: list[dict],
+        model: str = "",
+    ) -> None:
         """Record one turn, redacted, and trim to the retention cap."""
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO turns (tenant_id, username, role, ts, question, answer, trace)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO turns"
+                " (tenant_id, username, role, ts, question, answer, trace, model)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     principal.tenant_id,
                     principal.username,
@@ -114,6 +147,7 @@ class ConversationStore:
                     OutputGuard.redact(question) or "",
                     OutputGuard.redact(answer) or "",
                     json.dumps(trace or [], default=str),
+                    model,
                 ),
             )
             # Trim within this principal only -- never touch another user's rows.
@@ -148,7 +182,7 @@ class ConversationStore:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT question, answer, trace, ts FROM turns
+                SELECT question, answer, trace, ts, model FROM turns
                  WHERE tenant_id = ? AND username = ? AND role = ?
                  ORDER BY id DESC LIMIT ?
                 """,
@@ -160,6 +194,7 @@ class ConversationStore:
                 answer=row["answer"],
                 trace=json.loads(row["trace"]),
                 timestamp=row["ts"],
+                model=row["model"] or "",
             )
             for row in reversed(rows)
         ]

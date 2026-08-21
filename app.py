@@ -121,7 +121,13 @@ def get_session():
         turns = session.conversations.load(principal) if session.conversations else []
         agent.restore(turns)
         st.session_state.history = [
-            {"question": t.question, "answer": t.answer, "trace": t.trace, "artifacts": []}
+            {
+                "question": t.question,
+                "answer": t.answer,
+                "trace": t.trace,
+                "artifacts": [],
+                "model": t.model,
+            }
             for t in turns
         ]
         st.session_state.session = session
@@ -281,6 +287,8 @@ def render_chat(session) -> None:
             st.write(entry["question"])
         with st.chat_message("assistant"):
             st.write(entry["answer"])
+            if entry.get("model"):
+                st.caption(f"answered by `{entry['model']}`")
             if entry.get("trace"):
                 with st.expander("Reasoning, tools and executed SQL"):
                     render_trace(entry["trace"])
@@ -292,19 +300,24 @@ def render_chat(session) -> None:
             st.write(pending)
         with st.chat_message("assistant"), st.spinner("Planning, querying, checking…"):
             reply = st.session_state.agent.ask(pending)
+        # The agent, not the sidebar picker: if the model was switched while a
+        # question was in flight, the picker already shows the new one and the
+        # answer came from the old.
+        answered_by = getattr(st.session_state.agent, "model_name", "")
         st.session_state.history.append(
             {
                 "question": pending,
                 "answer": reply.answer,
                 "trace": reply.trace,
                 "artifacts": reply.artifacts,
+                "model": answered_by,
             }
         )
         if session.conversations:
             # Artifacts are deliberately not persisted: large, re-derivable by
             # asking again, and each one is another copy of tenant data.
             session.conversations.append(
-                session.principal, pending, reply.answer, reply.trace
+                session.principal, pending, reply.answer, reply.trace, answered_by
             )
         st.rerun()
 

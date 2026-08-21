@@ -458,24 +458,47 @@ def test_ablation_removes_the_policy_text(agent: SecureAgent) -> None:
 
 
 # ------------------------------------------------- figures must be grounded ---
-# Third fabrication in this project, each in a different shape. Handed
-# `p90_salary 157000.0`, llama3.1 wrote "the average salary is EUR 83,419" --
-# wrong number, wrong label, and a query had genuinely run, so the no-tool guard
-# could not see it. The prompt has said "never invent numbers" throughout.
+# Four fabrications in this project, each in a different shape. The last one
+# exposed a blind spot in the guard itself: a magnitude threshold of 1000, set
+# so legitimate headcounts from the system prompt were not flagged, waved
+# through "there is only 1 employee in Marketing" and "the result is 0". The
+# real figure is 62. Grounding is decided by provenance now, not by size.
 
 
-def test_a_figure_no_tool_produced_is_flagged() -> None:
+def test_a_figure_no_source_supports_is_flagged() -> None:
     from agent import _unsupported_figures
 
-    tools = ["1 row(s) returned.\n p90_salary\n 157000.0"]
-    assert _unsupported_figures("The average salary is 83,419", tools) == [83419.0]
+    sources = ["p90_salary = 157000.0"]
+    assert _unsupported_figures("The average salary is 83,419", sources) == [83419.0]
+
+
+def test_a_small_fabricated_count_is_flagged() -> None:
+    """The case the magnitude threshold missed entirely."""
+    from agent import _unsupported_figures
+
+    assert _unsupported_figures("There is only 1 employee in Marketing", [])
+    assert _unsupported_figures("The result is 0.", [])
 
 
 def test_a_figure_a_tool_produced_is_accepted() -> None:
     from agent import _unsupported_figures
 
-    tools = ["1 row(s) returned.\n p90_salary\n 157000.0"]
-    assert _unsupported_figures("The 90th percentile is 157,000", tools) == []
+    assert _unsupported_figures("There are 62 people in Marketing", ["count_rows = 62"]) == []
+
+
+def test_a_figure_from_the_system_prompt_is_accepted() -> None:
+    """Tenant headcount is legitimately available without a query."""
+    from agent import _unsupported_figures
+
+    prompt = "Your organisation has 500 employees."
+    assert _unsupported_figures("You have 500 employees.", [prompt]) == []
+
+
+def test_a_figure_from_the_question_is_accepted() -> None:
+    from agent import _unsupported_figures
+
+    question = "show me people earning over 100000"
+    assert _unsupported_figures("Nobody earns over 100000.", [question]) == []
 
 
 def test_rounding_is_allowed() -> None:
@@ -483,17 +506,3 @@ def test_rounding_is_allowed() -> None:
     from agent import _unsupported_figures
 
     assert _unsupported_figures("the average is 145,257", ["avg_salary 145256.58"]) == []
-
-
-def test_small_numbers_are_not_data_claims() -> None:
-    """Headcounts and ordinals come from the prompt or the question."""
-    from agent import _unsupported_figures
-
-    assert _unsupported_figures("There are 7 departments and 500 employees", []) == []
-
-
-def test_ungrounded_detects_a_figure_with_no_query_at_all() -> None:
-    from agent import _looks_ungrounded
-
-    assert _looks_ungrounded("Here is the highest salary: EUR 250,000")
-    assert not _looks_ungrounded("I can only see your own organisation's employees.")

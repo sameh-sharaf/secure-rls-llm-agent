@@ -517,9 +517,8 @@ class SecureAgent:
                 ],
             }
 
-        messages: list[AnyMessage] = [
-            SystemMessage(content=system_prompt(self.session, include_policy=self.include_policy))
-        ]
+        prompt_text = system_prompt(self.session, include_policy=self.include_policy)
+        messages: list[AnyMessage] = [SystemMessage(content=prompt_text)]
         messages += state.get("messages", [])
         response = self.llm.invoke(messages)
         text = _content_of(response)
@@ -552,16 +551,28 @@ class SecureAgent:
                 )
             )
 
-        # A figure the tools never produced is fabricated, whether or not a
-        # query ran. Show the tool's own result instead of the model's prose:
-        # we have the number, so refusing would be worse than answering.
+        # Every figure in the answer must trace to the question, the system
+        # prompt, or a tool result from this turn. Enforced rather than asked
+        # for: the prompt has said "never invent numbers" since the first
+        # commit, and models have ignored it four times in this project.
         tool_outputs = [
             str(m.content) for m in this_turn_messages
             if isinstance(m, ToolMessage) and not str(m.content).startswith(("REFUSED", "BLOCKED"))
         ]
-        if tool_outputs and _unsupported_figures(text, tool_outputs):
+        # Sources are specific evidence, not the whole prompt. The prompt is a
+        # page of incidental numbers -- "performance_score REAL 1.0-5.0",
+        # sample user_ids, hire dates -- and using it wholesale made almost any
+        # small figure "supported", which is how "there is only 1 employee in
+        # Marketing" got through a guard written to catch exactly that.
+        sources = [
+            state.get("question", ""),
+            str(self.session.gateway.total_rows()),
+            *tool_outputs,
+        ]
+        if _unsupported_figures(text, sources):
             grounded = _fallback_from_tools(state)
             if grounded:
+                # We have the real number; showing it beats refusing.
                 return {
                     "answer": grounded,
                     "messages": [AIMessage(content=grounded)],
@@ -571,21 +582,14 @@ class SecureAgent:
                              seconds=time.perf_counter() - started)
                     ],
                 }
-
-        # An answer with figures but no query behind it is fabricated by
-        # construction. Block it rather than trusting the prompt rule that
-        # says not to invent numbers -- models have ignored that rule three
-        # times in this project.
-        if not ran_any_tool and _looks_ungrounded(text):
-            grounded = (
+            refusal = (
                 "I did not run a query for that, so I have no figure to give you -- and "
-                "I am not going to guess one. Ask again and I will query it: for the top "
-                "of the salary range try \"what is the 90th percentile salary?\", or "
-                "\"average salary by department\"."
+                "I am not going to guess one. Ask again and I will query it, for example "
+                "\"how many people work in Marketing?\" or \"average salary by department\"."
             )
             return {
-                "answer": grounded,
-                "messages": [AIMessage(content=grounded)],
+                "answer": refusal,
+                "messages": [AIMessage(content=refusal)],
                 "trace": [
                     step("answer", "Blocked an ungrounded figure", status="blocked",
                          layer="L5 output guard", seconds=time.perf_counter() - started)
@@ -892,13 +896,19 @@ def _refusal_answer(state: AgentState) -> tuple[str | None, str | None]:
     return _humanise_refusal(chosen), layer
 
 
-#: Figures at or above this are data claims, not incidental numbers.
-#:
-#: Tenant headcounts (500/300/200) and percentile labels (90th) sit below it and
-#: are legitimately available from the system prompt; salaries and payroll
-#: totals sit above it and can only come from a query.
-_DATA_CLAIM_THRESHOLD = 1000
 _NUMBER_IN_TEXT = re.compile(r"\d[\d,.]*")
+
+#: A magnitude threshold used to stand here, set at 1000 so that tenant
+#: headcounts coming legitimately from the system prompt were not flagged.
+#:
+#: It was tuned for salaries and blind to counts. Asked for the Marketing
+#: headcount with no tool call made, llama3.1 answered "there is only 1
+#: employee" and then "the result is 0" -- both invented, both far below the
+#: threshold, both waved through. The real figure is 62.
+#:
+#: Grounding is now decided by provenance rather than size: a figure is
+#: supported if it appears in the question, in the system prompt, or in a tool
+#: result from this turn. That has no blind spot at any magnitude.
 
 
 def _numbers_in(text: str) -> list[float]:
@@ -912,50 +922,29 @@ def _numbers_in(text: str) -> list[float]:
     return out
 
 
-def _unsupported_figures(text: str, tool_outputs: list[str]) -> list[float]:
-    """Figures the answer asserts that no tool result supports.
+def _unsupported_figures(text: str, sources: list[str]) -> list[float]:
+    """Figures the answer asserts that nothing in `sources` supports.
 
     The numeric analogue of the canary scan, and checkable without knowing the
-    right answer: every figure of any size in an answer should trace back to a
-    number a tool returned. Handed `p90_salary 157000.0`, llama3.1 wrote "the
-    average salary is EUR 83,419" -- wrong number, wrong label, and a query had
-    genuinely run, so the no-tool guard above could not see it.
+    right answer: every figure in an answer should trace back to the question,
+    the system prompt, or a tool result from this turn. If it traces to none of
+    those, the model made it up.
 
     A 1% tolerance allows honest rounding (145256.58 reported as 145,257)
     without allowing invention.
+
+    The cost is real and worth naming: a genuinely derived figure -- "62, about
+    12% of the organisation" -- has no source and is flagged. The answer is
+    then replaced by the tool's own result, which is less fluent and still
+    correct. On a system whose whole argument is that you can trust what it
+    returns, that is the right side to err on.
     """
-    supported = [n for output in tool_outputs for n in _numbers_in(output)]
+    supported = [n for source in sources for n in _numbers_in(source)]
     offenders = []
     for value in _numbers_in(text):
-        if abs(value) < _DATA_CLAIM_THRESHOLD:
-            continue
         if not any(abs(value - s) <= max(abs(s) * 0.01, 0.5) for s in supported):
             offenders.append(value)
     return offenders
-
-
-def _looks_ungrounded(text: str) -> bool:
-    """Does this answer assert a figure that no tool produced?
-
-    Enforced rather than requested. The system prompt already says "never
-    invent numbers"; a prompt is the weakest control in this system and this is
-    the third time a model has ignored it. Asked for the highest salary with no
-    tool call made, llama3.1 replied "the 90th percentile is still 104000" --
-    the real figure is 157,000, and it had queried nothing at all.
-
-    A turn that ran no tool has no grounded figure to report, so a large number
-    in its answer is fabricated by construction. That is checkable without
-    knowing the right answer, which is what makes it worth checking.
-    """
-    for match in _NUMBER_IN_TEXT.finditer(text or ""):
-        raw = match.group(0).rstrip(".,").replace(",", "")
-        try:
-            value = float(raw)
-        except ValueError:
-            continue
-        if abs(value) >= _DATA_CLAIM_THRESHOLD:
-            return True
-    return False
 
 
 def _fallback_from_tools(state: AgentState) -> str:

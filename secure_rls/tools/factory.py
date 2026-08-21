@@ -240,6 +240,14 @@ def _frame(result: QueryResult) -> pd.DataFrame:
     return pd.DataFrame(result.rows)
 
 
+def _limit_of(result: QueryResult) -> int | None:
+    """The LIMIT the query ran with, if it is visible in the bound params."""
+    for param in reversed(result.params or []):
+        if isinstance(param, int):
+            return param
+    return None
+
+
 def _summarise(result: QueryResult, note: str = "") -> str:
     """Compact, model-facing rendering of a result set."""
     if not result.rows:
@@ -248,8 +256,37 @@ def _summarise(result: QueryResult, note: str = "") -> str:
             "you can only ever see your own organisation's employees."
         )
     frame = _frame(result)
+
+    # A single-row result is almost always one aggregate, and leading with the
+    # row count buries the answer behind a number that looks like one. Asked
+    # for the Marketing headcount, llama3.1 read "1 row(s) returned" and
+    # answered "there is 1 employee in Marketing" -- the real figure, 62, was
+    # on the next line. The format of a tool result is part of the interface to
+    # the model, and a misleading preamble produces wrong answers from right
+    # data. State the value first.
+    if result.row_count == 1:
+        row = frame.iloc[0].to_dict()
+        lines = ["; ".join(f"{key} = {value}" for key, value in row.items())]
+        if note:
+            lines.append(note)
+        if result.rewrites:
+            lines.append("Policy applied: " + "; ".join(result.rewrites))
+        return "\n".join(lines)
+
     preview = frame.head(MAX_PREVIEW_ROWS)
-    lines = [f"{result.row_count} row(s) returned."]
+
+    # When the result fills the limit exactly it is almost certainly truncated,
+    # and the row count is not a total. qwen2.5 fetched 25 rows -- the default
+    # limit -- and answered "there are 25 employees in Marketing"; the real
+    # figure is 62. Say so in the result rather than hoping the model infers it.
+    truncated = result.row_count >= limit if (limit := _limit_of(result)) else False
+    header = (
+        f"{result.row_count} row(s) returned -- this is the row limit, so the result is "
+        f"cut off and this count is NOT a total. Use metrics=['count'] for a total."
+        if truncated
+        else f"{result.row_count} row(s) returned."
+    )
+    lines = [header]
     if note:
         lines.append(note)
     if result.rewrites:

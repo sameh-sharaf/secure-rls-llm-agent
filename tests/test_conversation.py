@@ -144,3 +144,69 @@ def test_store_is_separate_from_the_employee_database(tmp_path: Path) -> None:
 
     assert STORE_PATH != DB_PATH
     assert STORE_PATH.name != DB_PATH.name
+
+
+# ------------------------------------------------------- which model answered ---
+# The model can be switched mid-conversation, and the bake-off measured answer
+# accuracy from 72% to 100% across the three local models. A transcript where
+# half the turns came from a weaker model and half from a stronger one, with no
+# way to tell which, is a transcript you cannot judge.
+
+
+def test_the_answering_model_round_trips(store: ConversationStore) -> None:
+    p = _p("acme_admin")
+    store.append(p, "q", "a", [], "qwen2.5:7b")
+    assert store.load(p)[0].model == "qwen2.5:7b"
+
+
+def test_each_turn_keeps_its_own_model(store: ConversationStore) -> None:
+    """A mid-conversation switch must not relabel earlier turns."""
+    p = _p("acme_admin")
+    store.append(p, "q1", "a1", [], "qwen2.5:7b")
+    store.append(p, "q2", "a2", [], "llama3.1:8b")
+    assert [t.model for t in store.load(p)] == ["qwen2.5:7b", "llama3.1:8b"]
+
+
+def test_model_is_optional(store: ConversationStore) -> None:
+    p = _p("acme_admin")
+    store.append(p, "q", "a", [])
+    assert store.load(p)[0].model == ""
+
+
+def test_a_database_from_before_the_column_still_opens(tmp_path: Path) -> None:
+    """Migrate rather than discard.
+
+    The store is local and gitignored, so this could be "delete the file" --
+    except the entire point of persisting a transcript is that it survives.
+    Dropping someone's history to add a column undercuts the feature.
+    """
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute(
+        """
+        CREATE TABLE turns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL, username TEXT NOT NULL, role TEXT NOT NULL,
+            ts REAL NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL,
+            trace TEXT NOT NULL
+        )
+        """
+    )
+    old.execute(
+        "INSERT INTO turns (tenant_id, username, role, ts, question, answer, trace)"
+        " VALUES ('acme', 'acme_admin', 'hr_admin', 1.0, 'old q', 'old a', '[]')"
+    )
+    old.commit()
+    old.close()
+
+    store = ConversationStore(path)          # must migrate, not explode
+    p = _p("acme_admin")
+    turns = store.load(p)
+    assert len(turns) == 1, "the pre-existing turn was lost"
+    assert turns[0].question == "old q"
+    assert turns[0].model == ""
+
+    store.append(p, "new q", "new a", [], "gemma4:26b-a4b-it-q4_K_M")
+    assert [t.model for t in store.load(p)] == ["", "gemma4:26b-a4b-it-q4_K_M"]
