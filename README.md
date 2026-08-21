@@ -306,8 +306,13 @@ mistaken for the boundary is how systems get misjudged as safe.
   differential privacy.
 - **No hosted demo.** A 7B model needs hardware free tiers do not provide, and
   swapping in a hosted API would contradict the offline requirement. `docker
-  compose up` is the reproducible path; the Azure Container Apps manifest is
-  written and documented but not deployed.
+  compose up` is the intended reproducible path; the Azure Container Apps
+  manifest is written and documented but not deployed.
+- **The container is unbuilt.** Docker is not installed on the machine this was
+  developed on, so the `Dockerfile` and `docker-compose.yml` are written and
+  YAML-valid but have never been executed. Treat them as a documented intent
+  rather than a tested path until someone runs `docker compose up`. Everything
+  else in this README was measured.
 - **Read-only.** The moment the agent can write, this threat model needs
   revisiting — human-in-the-loop approval as a graph `interrupt` would be first.
 

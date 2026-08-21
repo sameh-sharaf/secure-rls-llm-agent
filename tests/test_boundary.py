@@ -125,6 +125,22 @@ def test_cte_named_employees_cannot_impersonate_the_view(
         acme.execute(sql).fetchall()
 
 
+def test_statement_timeout_is_per_statement_not_per_connection() -> None:
+    """A slow query must not poison every query that follows it.
+
+    Regression for a latent bug: the original progress handler counted its own
+    invocations against a fixed budget and never reset, so one expensive
+    statement would abort every later statement on that connection. It escaped
+    notice because a 500-row table rarely ticks the handler at all.
+    """
+    with TenantDatabase("acme") as database:
+        for _ in range(250):
+            rows = database.execute(
+                "SELECT department, COUNT(*) AS n FROM employees GROUP BY department"
+            )
+            assert rows, "connection stopped returning rows part-way through"
+
+
 def test_canary_of_other_tenants_is_never_visible() -> None:
     for tenant in sorted(ALLOWED_TENANTS):
         with TenantDatabase(tenant) as database:

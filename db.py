@@ -45,6 +45,7 @@ docs/adr/0004-postgres-parity.md).
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -78,9 +79,11 @@ AGENT_COLUMNS: tuple[str, ...] = (
 #: Hard ceiling on rows returned to the agent from any single statement.
 MAX_ROWS = 500
 
-#: Rough statement timeout, enforced via the VM-instruction progress handler.
-_PROGRESS_INSTRUCTIONS = 100_000
-_MAX_PROGRESS_CALLS = 200
+#: Statement timeout, enforced via the VM-instruction progress handler. SQLite
+#: calls the handler every `_PROGRESS_INSTRUCTIONS` virtual-machine steps; a
+#: non-zero return aborts the running statement.
+_PROGRESS_INSTRUCTIONS = 10_000
+STATEMENT_TIMEOUT_SECONDS = 5.0
 
 
 class SecurityError(RuntimeError):
@@ -226,7 +229,9 @@ def _make_authorizer(tenant: str):
     return authorizer
 
 
-def tenant_connection(tenant: str, db_path: Path = DB_PATH) -> sqlite3.Connection:
+def tenant_connection(
+    tenant: str, db_path: Path = DB_PATH, clock: dict | None = None
+) -> sqlite3.Connection:
     """Return a connection that can only ever see `tenant`'s rows.
 
     Ordering matters and is not incidental:
@@ -256,17 +261,29 @@ def tenant_connection(tenant: str, db_path: Path = DB_PATH) -> sqlite3.Connectio
     conn.execute(f"CREATE INDEX temp.idx_dept ON {AGENT_TABLE}(department)")
 
     conn.set_authorizer(_make_authorizer(tenant))
-    _install_timeout(conn)
+    _install_timeout(conn, clock if clock is not None else {})
     return conn
 
 
-def _install_timeout(conn: sqlite3.Connection) -> None:
-    """Abort runaway statements. A cartesian join is a denial-of-service too."""
-    calls = {"n": 0}
+def _install_timeout(conn: sqlite3.Connection, clock: dict) -> None:
+    """Abort runaway statements. A cartesian join is a denial-of-service too.
+
+    The deadline is stored in a dict owned by the caller and reset before each
+    statement, so this is a *per-statement* timeout.
+
+    The obvious implementation -- count handler invocations and abort past a
+    fixed number -- is wrong in a way that is easy to miss: the counter is
+    per-connection and never resets, so a single expensive query permanently
+    poisons the connection and every later statement aborts immediately. It
+    only escapes notice because a 500-row table rarely ticks the handler at
+    all. A deadline has no such state to leak between statements.
+    """
 
     def handler() -> int:
-        calls["n"] += 1
-        return 1 if calls["n"] > _MAX_PROGRESS_CALLS else 0
+        deadline = clock.get("deadline")
+        if deadline is None:
+            return 0
+        return 1 if time.monotonic() > deadline else 0
 
     conn.set_progress_handler(handler, _PROGRESS_INSTRUCTIONS)
 
@@ -280,10 +297,14 @@ class TenantDatabase:
 
     def __init__(self, tenant: str, db_path: Path = DB_PATH) -> None:
         self.tenant = _require_known_tenant(tenant)
-        self._conn = tenant_connection(self.tenant, db_path)
+        self._clock: dict = {}
+        self._conn = tenant_connection(self.tenant, db_path, self._clock)
 
     def execute(self, sql: str, params: Sequence[Any] | None = None) -> list[dict]:
         """Run a statement on the bound connection and return capped rows."""
+        # Reset the deadline per statement, so one slow query cannot poison the
+        # connection for every query after it.
+        self._clock["deadline"] = time.monotonic() + STATEMENT_TIMEOUT_SECONDS
         try:
             cursor = self._conn.execute(sql, tuple(params or ()))
         except sqlite3.DatabaseError as exc:
