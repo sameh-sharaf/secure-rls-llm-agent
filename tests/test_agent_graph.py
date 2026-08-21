@@ -15,9 +15,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from langchain_core.messages import AIMessage, ToolMessage  # noqa: E402
+
 from agent import (  # noqa: E402
     RESET,
     SecureAgent,
+    _fallback_from_tools,
+    _humanise_refusal,
     _looks_cross_tenant,
     merge_reasons,
     merge_steps,
@@ -89,6 +93,52 @@ def test_merge_steps_clears_on_reset() -> None:
 
 def test_merge_reasons_clears_on_reset() -> None:
     assert merge_reasons(["old"], ["__reset__", "new"]) == ["new"]
+
+
+# ------------------------------------------------------ refusal surfacing ---
+# Regression for a real finding: 10 of 50 red-team cases ended with the generic
+# "could not phrase a summary" because the fallback skipped refusals entirely.
+# The policy fired and then said nothing about why -- over-blocking with the
+# explanation discarded, which is a failure mode this project claims to measure.
+
+
+def test_refusal_reason_reaches_the_user_when_the_model_says_nothing() -> None:
+    state = {
+        "messages": [
+            AIMessage(content=""),
+            ToolMessage(
+                content=(
+                    "REFUSED (request policy): your role may not read salary for "
+                    "individual employees; ask for an aggregate instead"
+                ),
+                tool_call_id="1",
+            ),
+        ]
+    }
+    out = _fallback_from_tools(state)
+    assert "may not read salary" in out
+    assert "could not phrase" not in out
+    assert "REFUSED" not in out
+
+
+def test_data_is_preferred_over_a_refusal_when_both_exist() -> None:
+    state = {
+        "messages": [
+            ToolMessage(content="REFUSED (query policy): unknown column", tool_call_id="1"),
+            ToolMessage(content="7 row(s) returned.\ndepartment  avg", tool_call_id="2"),
+        ]
+    }
+    assert _fallback_from_tools(state).startswith("7 row(s)")
+
+
+def test_humanise_refusal_strips_the_machine_prefix() -> None:
+    out = _humanise_refusal("REFUSED (minimum cohort size): that aggregate covers only 1 employee")
+    assert out.startswith("I can't answer that:")
+    assert "REFUSED" not in out
+
+
+def test_no_tool_output_yields_no_fallback() -> None:
+    assert _fallback_from_tools({"messages": [AIMessage(content="")]}) == ""
 
 
 # ---------------------------------------------------------------- router ---

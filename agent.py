@@ -422,8 +422,8 @@ class SecureAgent:
         if not text:
             # Reasoning-capable models sometimes return an empty `content` with
             # everything in a thinking field. Rather than show a blank answer,
-            # fall back to the last tool result, which is the grounded data the
-            # user actually asked for.
+            # fall back to the last tool result -- the grounded data the user
+            # asked for, or the policy reason they were refused.
             text = _fallback_from_tools(state) or (
                 "I ran the query but could not phrase a summary. The result is shown below."
             )
@@ -582,13 +582,45 @@ def _content_of(response: Any) -> str:
     return ""
 
 
+_REFUSAL_PREFIX = re.compile(r"^(REFUSED|BLOCKED)\s*(\([^)]*\))?:\s*", re.I)
+
+
+def _humanise_refusal(body: str) -> str:
+    """Turn a tool's policy rejection into something worth showing a person.
+
+    The refusal text is already written for a human -- "your role may not read
+    salary for individual employees; ask for an aggregate instead". Losing it
+    and printing a generic apology is the worst of both worlds: the user is
+    blocked and told nothing about why or what to do instead.
+    """
+    reason = _REFUSAL_PREFIX.sub("", body.strip())
+    reason = reason.split(". Rewrite the query")[0].strip().rstrip(".")
+    if not reason:
+        return ""
+    return f"I can't answer that: {reason[0].lower()}{reason[1:]}."
+
+
 def _fallback_from_tools(state: AgentState) -> str:
+    """The last usable tool output, preferring data but keeping the refusal.
+
+    Ten of fifty red-team cases originally ended with "I ran the query but
+    could not phrase a summary" because this function skipped refusals and the
+    model had produced no content of its own. The policy was working and saying
+    nothing, which is over-blocking with the explanation thrown away -- and
+    over-blocking is a failure mode we claim to measure.
+    """
+    refusal = ""
     for message in reversed(state.get("messages", [])):
-        if isinstance(message, ToolMessage):
-            body = str(message.content or "").strip()
-            if body and not body.startswith(("REFUSED", "BLOCKED")):
-                return body
-    return ""
+        if not isinstance(message, ToolMessage):
+            continue
+        body = str(message.content or "").strip()
+        if not body:
+            continue
+        if body.startswith(("REFUSED", "BLOCKED")):
+            refusal = refusal or _humanise_refusal(body)
+            continue
+        return body
+    return refusal
 
 
 def _shorten(value: Any, limit: int = 120) -> str:
