@@ -42,6 +42,12 @@ class Aggregate(StrEnum):
     SUM = "sum"
     MIN = "min"
     MAX = "max"
+    #: SQLite has no MEDIAN function, so this one is computed by the gateway in
+    #: pandas over the tenant-bound rows rather than compiled into SQL. It is
+    #: here because "what is the median salary" is an obvious HR question, and
+    #: the correctness suite caught the model flailing without it -- asked for a
+    #: median, it selected raw salaries and gave up.
+    MEDIAN = "median"
 
 
 class Operator(StrEnum):
@@ -84,6 +90,8 @@ class Metric(BaseModel):
     alias: str | None = None
 
     def sql(self) -> str:
+        if self.agg is Aggregate.MEDIAN:
+            raise SpecError("median is computed by the gateway, not compiled to SQL")
         func = self.agg.value.upper()
         inner = "*" if self.agg is Aggregate.COUNT else self.column.value
         return f"{func}({inner}) AS {self.output_name()}"
@@ -154,12 +162,23 @@ def _compile_predicate(pred: Predicate) -> tuple[str, list[Any]]:
     return f"{col} {pred.op.value} ?", [pred.value]
 
 
-def compile_spec(spec: QuerySpec, *, masked_columns: frozenset[str] = frozenset()) -> CompiledQuery:
+def compile_spec(
+    spec: QuerySpec,
+    *,
+    masked_columns: frozenset[str] = frozenset(),
+    limit_override: int | None = None,
+) -> CompiledQuery:
     """Turn a validated spec into parameterised SQL.
 
     `masked_columns` comes from the caller's role policy (layer 1). A masked
     column may still be aggregated -- an analyst can ask for the average salary
     in Engineering -- but may not be selected for a named individual.
+
+    `limit_override` raises the row cap above what a `QuerySpec` can express.
+    It exists for one internal caller: the gateway's median path, which must
+    read the whole tenant to compute a correct statistic. The model cannot
+    reach it -- `QuerySpec.limit` is still capped at 200 by validation, and
+    this argument is keyword-only and never populated from tool input.
     """
     if not spec.select and not spec.metrics:
         raise SpecError("a query must select at least one column or metric")
@@ -209,7 +228,7 @@ def compile_spec(spec: QuerySpec, *, masked_columns: frozenset[str] = frozenset(
         sql += f" ORDER BY {spec.metrics[0].output_name()} DESC"
 
     sql += " LIMIT ?"
-    params.append(spec.limit)
+    params.append(limit_override if limit_override is not None else spec.limit)
 
     return CompiledQuery(
         sql=sql,

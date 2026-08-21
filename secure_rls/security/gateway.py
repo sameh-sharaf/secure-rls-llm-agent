@@ -17,12 +17,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from db import DB_PATH, SecurityError, TenantDatabase, tenant_user_ids
+from db import DB_PATH, MAX_ROWS, SecurityError, TenantDatabase, tenant_user_ids
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.output_guard import GuardVerdict, OutputGuard
 from secure_rls.security.principal import Principal
 from secure_rls.security.spec import (
     MIN_COHORT_SIZE,
+    Aggregate,
     QuerySpec,
     SpecError,
     cohort_size_query,
@@ -82,6 +83,8 @@ class QueryGateway:
 
     def run_spec(self, spec: QuerySpec, *, tool: str = "query_db") -> QueryResult:
         """Structured path: compile a typed spec and execute it."""
+        if any(m.agg is Aggregate.MEDIAN for m in spec.metrics):
+            return self._run_median(spec, tool=tool)
         started = time.perf_counter()
         masked = self.principal.policy.masked_columns()
 
@@ -129,6 +132,78 @@ class QueryGateway:
         self._audit(tool, sql, guarded.sql, len(rows), verdict.summary, "ok", started)
         return QueryResult(
             rows=rows, sql=guarded.sql, rewrites=guarded.rewrites, verdict=verdict
+        )
+
+    def _run_median(self, spec: QuerySpec, *, tool: str) -> QueryResult:
+        """Median, computed in pandas over rows the boundary already filtered.
+
+        SQLite has no MEDIAN function. Rather than teach the model a SQL trick
+        involving ORDER BY and OFFSET -- which would push complexity onto the
+        least reliable component -- the gateway fetches the column through the
+        ordinary bound path and computes the statistic itself.
+
+        The rows still come from the tenant-bound connection, still pass the
+        output guard, and still get audited. The k-anonymity rule is applied to
+        each group afterwards, exactly as the HAVING clause would have.
+        """
+        import pandas as pd
+
+        started = time.perf_counter()
+        metric = next(m for m in spec.metrics if m.agg is Aggregate.MEDIAN)
+
+        # No mask is applied to this fetch: a median is an aggregate, so a
+        # masked column is legitimate here for exactly the reason an analyst may
+        # ask for an average. The individual values never leave this method.
+        fetch = QuerySpec(
+            select=[*spec.group_by, metric.column],
+            filters=spec.filters,
+        )
+        try:
+            # MAX_ROWS, not the spec's 200-row cap: a median over the first 200
+            # of 500 rows is simply a wrong number. Exact up to MAX_ROWS; beyond
+            # that a warehouse percentile function is the right answer, not a
+            # bigger fetch.
+            compiled = compile_spec(fetch, limit_override=MAX_ROWS)
+            rows = self._db.execute(compiled.sql, compiled.params)
+        except (SpecError, SecurityError) as exc:
+            self._audit(tool, spec.model_dump_json(), None, 0, "n/a", f"rejected: {exc}", started)
+            raise
+
+        frame = pd.DataFrame(rows)
+        column = metric.column.value
+        alias = metric.output_name()
+
+        if frame.empty:
+            out: list[dict] = []
+        elif spec.group_by:
+            keys = [c.value for c in spec.group_by]
+            grouped = frame.groupby(keys)[column]
+            summary = grouped.agg(["median", "count"]).reset_index()
+            summary = summary[summary["count"] >= MIN_COHORT_SIZE]
+            summary = summary.rename(columns={"median": alias}).drop(columns=["count"])
+            out = summary.to_dict("records")
+        else:
+            if len(frame) < MIN_COHORT_SIZE:
+                raise CohortTooSmall(
+                    f"that median covers only {len(frame)} employee(s); at least "
+                    f"{MIN_COHORT_SIZE} are required before a statistic can be reported"
+                )
+            out = [{alias: float(frame[column].median())}]
+
+        verdict = self._guard.check_rows(out)
+        self._audit(
+            tool, spec.model_dump_json(), compiled.sql, len(out), verdict.summary, "ok", started
+        )
+        return QueryResult(
+            rows=out,
+            sql=compiled.sql,
+            params=compiled.params,
+            rewrites=[
+                f"median computed by the gateway over {len(frame)} tenant rows "
+                f"(SQLite has no MEDIAN function)",
+                f"groups smaller than {MIN_COHORT_SIZE} dropped (k-anonymity)",
+            ],
+            verdict=verdict,
         )
 
     # ------------------------------------------------------------ helpers ---

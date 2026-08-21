@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, TypedDict
 
+import pandas as pd
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import InMemorySaver
@@ -36,6 +37,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from db import schema_description
+from secure_rls.security.output_guard import LeakDetected
 from secure_rls.session import Session
 
 DEFAULT_MODEL = os.environ.get("SECURE_RLS_MODEL", "gemma4:26b-a4b-it-q4_K_M")
@@ -379,13 +381,19 @@ class SecureAgent:
 
         for artifact in self.session.context.artifacts:
             payload = getattr(artifact, "payload", None)
-            if hasattr(payload, "to_dict"):
-                try:
-                    rows = payload.to_dict("records")
-                    self.session.gateway.verify_rows(rows)  # raises on a leak
-                except Exception as exc:
-                    if "guard" in str(exc).lower() or "canary" in str(exc).lower():
-                        findings.append(str(exc))
+            # `isinstance`, not `hasattr(payload, "to_dict")`. A Plotly Figure
+            # also has `to_dict`, with an incompatible signature, so the
+            # duck-typed version raised TypeError on every chart -- and the
+            # except clause below swallowed it, so charts were silently never
+            # verified here. The rows behind a chart were still checked at the
+            # gateway, so nothing leaked; but a guard that quietly does nothing
+            # is worse than no guard, because it reads as coverage.
+            if not isinstance(payload, pd.DataFrame):
+                continue
+            try:
+                self.session.gateway.verify_rows(payload.to_dict("records"))
+            except LeakDetected as exc:
+                findings.append(str(exc))
 
         for message in state["messages"][-4:]:
             if isinstance(message, ToolMessage):

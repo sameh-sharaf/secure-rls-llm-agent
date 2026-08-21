@@ -106,7 +106,7 @@ class QueryEmployeesArgs(_Base):
     select: list[Column] = Field(
         default_factory=list, description="Columns to return for individual employees"
     )
-    metrics: list[Literal["count", "avg", "sum", "min", "max"]] = Field(
+    metrics: list[Literal["count", "avg", "sum", "min", "max", "median"]] = Field(
         default_factory=list, description="Aggregates to compute"
     )
     metric_column: Column = Field(

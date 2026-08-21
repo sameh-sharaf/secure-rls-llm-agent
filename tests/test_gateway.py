@@ -150,6 +150,118 @@ def test_admin_can_read_individual_salary(acme_admin: QueryGateway) -> None:
     assert all("salary" in r for r in result.rows)
 
 
+# ---------------------------------------------------------------- median ---
+# SQLite has no MEDIAN, so the gateway computes it in pandas. Added after the
+# correctness suite caught the model flailing: asked for a median it had no way
+# to express, it selected raw salaries and gave up.
+
+
+@pytest.mark.parametrize("tenant", ["acme", "beta", "gamma"])
+def test_median_matches_pandas_ground_truth(tenant: str) -> None:
+    import pandas as pd
+
+    from db import CSV_PATH
+    from secure_rls.security.spec import Aggregate, Metric
+
+    frame = pd.read_csv(CSV_PATH)
+    truth = float(frame[frame.tenant_id == tenant].salary.median())
+
+    gw = QueryGateway(authenticate(f"{tenant}_admin", f"{tenant}123"))
+    try:
+        result = gw.run_spec(
+            QuerySpec(metrics=[Metric(agg=Aggregate.MEDIAN, column=Column.SALARY)])
+        )
+        assert result.rows[0]["median_salary"] == pytest.approx(truth)
+    finally:
+        gw.close()
+
+
+def test_median_reads_the_whole_tenant_not_the_spec_row_cap() -> None:
+    """acme has 500 rows; a median over the first 200 is a different number.
+
+    Regression for the first implementation, which reused QuerySpec's 200-row
+    validation cap for its internal fetch and silently produced a wrong answer.
+    """
+    import pandas as pd
+
+    from db import CSV_PATH
+    from secure_rls.security.spec import Aggregate, Metric
+
+    frame = pd.read_csv(CSV_PATH)
+    acme = frame[frame.tenant_id == "acme"].salary
+    assert len(acme) > 200, "fixture no longer exercises the cap"
+    truncated = float(acme.head(200).median())
+    full = float(acme.median())
+
+    gw = QueryGateway(authenticate("acme_admin", "acme123"))
+    try:
+        got = gw.run_spec(
+            QuerySpec(metrics=[Metric(agg=Aggregate.MEDIAN, column=Column.SALARY)])
+        ).rows[0]["median_salary"]
+    finally:
+        gw.close()
+    assert got == pytest.approx(full)
+    if truncated != full:
+        assert got != pytest.approx(truncated)
+
+
+def test_grouped_median_drops_small_cohorts() -> None:
+    from secure_rls.security.spec import Aggregate, Metric
+
+    gw = QueryGateway(authenticate("acme_admin", "acme123"))
+    try:
+        result = gw.run_spec(
+            QuerySpec(
+                metrics=[Metric(agg=Aggregate.MEDIAN, column=Column.SALARY)],
+                group_by=[Column.DEPARTMENT],
+            )
+        )
+        assert result.rows
+        assert any("k-anonymity" in r for r in result.rewrites)
+    finally:
+        gw.close()
+
+
+def test_median_over_one_person_is_refused() -> None:
+    from secure_rls.security.spec import Aggregate, Metric
+
+    gw = QueryGateway(authenticate("acme_admin", "acme123"))
+    try:
+        with pytest.raises(CohortTooSmall):
+            gw.run_spec(
+                QuerySpec(
+                    metrics=[Metric(agg=Aggregate.MEDIAN, column=Column.SALARY)],
+                    filters=[
+                        Predicate(column=Column.NAME, op=Operator.EQ, value="ZZ_CANARY_ACME")
+                    ],
+                )
+            )
+    finally:
+        gw.close()
+
+
+def test_median_is_tenant_scoped() -> None:
+    """The median path fetches rows itself -- it must not escape the boundary."""
+    import pandas as pd
+
+    from db import CSV_PATH
+    from secure_rls.security.spec import Aggregate, Metric
+
+    frame = pd.read_csv(CSV_PATH)
+    global_median = float(frame.salary.median())
+
+    gw = QueryGateway(authenticate("gamma_admin", "gamma123"))
+    try:
+        got = gw.run_spec(
+            QuerySpec(metrics=[Metric(agg=Aggregate.MEDIAN, column=Column.SALARY)])
+        ).rows[0]["median_salary"]
+    finally:
+        gw.close()
+    gamma_median = float(frame[frame.tenant_id == "gamma"].salary.median())
+    assert got == pytest.approx(gamma_median)
+    assert got != pytest.approx(global_median)
+
+
 # ---------------------------------------------------------- output guard ---
 
 def test_output_guard_raises_on_foreign_user_id() -> None:

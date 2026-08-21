@@ -21,6 +21,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -94,7 +95,12 @@ class LeakDetector:
         for artifact in artifacts:
             payload = getattr(artifact, "payload", None)
             rows = []
-            if hasattr(payload, "to_dict"):
+            # An explicit type check, not `hasattr(payload, "to_dict")`. A
+            # Plotly Figure also has `to_dict`, with an incompatible signature,
+            # so duck-typing here raised TypeError on every chart -- which the
+            # agent's guard node swallowed, meaning chart artifacts went
+            # unchecked entirely. Duck-typing a method name is not a type test.
+            if isinstance(payload, pd.DataFrame):
                 rows = payload.to_dict("records")
             elif isinstance(payload, list):
                 rows = [
