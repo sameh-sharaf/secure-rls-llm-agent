@@ -219,7 +219,9 @@ def compile_spec(
             raise SpecError(
                 f"your role may not read {metric.column.value} for individual employees, and "
                 f"{metric.agg.value.upper()}({metric.column.value}) reports one specific "
-                f"person's {metric.column.value}. Use an average or a median instead"
+                f"person's {metric.column.value}. Use an average or a median instead, and "
+                f"say plainly which statistic you computed -- do not present it as the "
+                f"{metric.agg.value}"
             )
 
     projections: list[str] = [c.value for c in spec.group_by]

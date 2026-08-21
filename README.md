@@ -220,11 +220,16 @@ in `e35b61b`.
 Same suites, same seeded dataset, same machine. Three local models via Ollama,
 75 cases each.
 
-| model | cross-tenant leak | red-team pass | refusal acc. | tool acc. | answer acc. | p50 | wall |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `llama3.1:8b` | **0.00%** | 90.0% | 68.8% | 100.0% | 72.2% | 3.4s | 4.7 min |
-| `qwen2.5:7b` | **0.00%** | 94.0% | 81.2% | 100.0% | 77.8% | 3.3s | 5.2 min |
-| `gemma4:26b-a4b` | **0.00%** | 100.0% | 100.0% | 100.0% | 100.0% | 28.3s | 26.4 min |
+| model | cross-tenant leak | red-team pass | refusal acc. | tool acc. | answer acc. | p50 |
+|---|---:|---:|---:|---:|---:|---:|
+| `llama3.1:8b` | **0.00%** | 84.9% | 57.9% | 100.0% | 72.2% | 2.1s |
+| `qwen2.5:7b` | **0.00%** | 88.7% | 68.4% | 100.0% | 77.8% | 1.6s |
+| `gemma4:26b-a4b` | **0.00%** | 98.1% | 94.7% | 100.0% | 100.0% | 30.6s |
+
+Measured after the two fixes below, against a suite that grew by three cases
+because of them. The earlier, more flattering run (llama 90% / qwen 94% /
+gemma 100%) was against a suite that did not yet contain the cases these models
+fail — which is the correct direction for a security suite to move.
 
 **This is the architecture claim, measured.** Answer accuracy spans 72% to 100%
 and latency spans 8×, while the cross-tenant leak rate is 0.00% for all three.
@@ -287,6 +292,28 @@ The general lesson is now invariant 5b in `CLAUDE.md`: *every path that shows a
 value is an output, including the prompt.* Neither of these two bugs was found
 by design review, by the red-team suite, or by 157 passing tests. Both were
 found by running a weaker model and reading what it said.
+
+#### What is left, and why it is not a leak
+
+With both fixed, `llama3.1` still fails these cases — but differently. Asked for
+the highest salary it now computes a *median* (permitted) and describes it as
+"the lowest salary in the company". The number is one an analyst may have; the
+label is wrong.
+
+That is misinformation, not disclosure, and it is worth separating carefully
+because a naive audit conflates them. Scanning answers for "any number matching
+a real salary" flags acme's median of €117,500 — which is both a legitimate
+aggregate *and* several employees' actual pay, because salaries are rounded to
+the nearest 500. A role-leak metric built that way would fire constantly on
+correct behaviour, and a metric that cries wolf gets ignored exactly when it
+matters. So the role boundary is enforced in the gateway and asserted
+deterministically in tests, rather than inferred from prose.
+
+The mitigation for the mislabelling is a refusal that tells the model what to
+say, not just what it cannot have: *"use an average or a median instead, and say
+plainly which statistic you computed — do not present it as the maximum."*
+`qwen2.5` refuses cleanly on every one of these; `llama3.1` does not, which is
+the sort of thing the correctness metric exists to price in.
 
 ### Ablation: which layer is actually load-bearing?
 

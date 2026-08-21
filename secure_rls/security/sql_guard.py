@@ -154,7 +154,8 @@ def _check_masked_columns(tree: exp.Expression, masked: frozenset[str]) -> bool:
                 _fail(
                     f"your role may not read {name} for individual employees, and "
                     f"{verb}({name}) reports one specific person's {name}. "
-                    f"Use AVG({name}) or a median instead"
+                    f"Use AVG({name}) or a median instead, and say plainly which "
+                    f"statistic you computed -- do not present it as the {verb.lower()}"
                 )
 
     aggregate_nodes = tuple(tree.find_all(exp.AggFunc))

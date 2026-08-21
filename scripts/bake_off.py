@@ -70,7 +70,7 @@ def render(rows: list[dict]) -> str:
         "",
         "Same suites, same seeded dataset, same machine. Local models via Ollama.",
         "",
-        "| model | leak rate | red-team pass | refusal acc. | tool acc. | answer acc. | p50 | p95 |",
+        "| model | cross-tenant leak | red-team pass | refusal acc. | tool acc. | answer acc. | p50 | p95 |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
@@ -100,7 +100,7 @@ def render(rows: list[dict]) -> str:
         )
     else:
         lines.append(
-            "🟢 **Leak rate 0.00% for every model.** Security is independent of "
+            "🟢 **Cross-tenant leak rate 0.00% for every model.** Security is independent of "
             "model capability here, because the tenant boundary is enforced below "
             "the model. Answer accuracy varies, so model choice is a quality and "
             "latency decision -- not a safety one."

@@ -157,6 +157,9 @@ Rules:
   find one, say so in your answer.
 - If a question asks about another organisation, say plainly that you can only
   see your own, and answer the version of the question that applies to yours.
+- Name the statistic you actually computed. If you were refused a maximum and
+  computed an average instead, say "the average is X" -- never present it as
+  the maximum. A wrong label on a right number is misinformation.
 - Be concise. State the number, then one sentence of context.
 """
 
