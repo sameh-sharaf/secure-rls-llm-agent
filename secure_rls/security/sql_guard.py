@@ -33,7 +33,7 @@ import sqlglot
 from sqlglot import exp
 
 from secure_rls.security.layers import Layer, tag
-from secure_rls.security.spec import MIN_COHORT_SIZE
+from secure_rls.security.spec import ENFORCE_MIN_COHORT, MIN_COHORT_SIZE
 
 DIALECT = "sqlite"
 
@@ -203,6 +203,8 @@ def _apply_k_anonymity(select: exp.Select, rewrites: list[str]) -> None:
     the SQL text. String surgery on SQL is the bug class this whole layer exists
     to avoid, and a trailing comment defeats it.
     """
+    if not ENFORCE_MIN_COHORT:
+        return
     if not select.args.get("group"):
         return
     if not list(select.find_all(exp.AggFunc)):

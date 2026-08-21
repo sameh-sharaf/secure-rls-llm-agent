@@ -91,20 +91,53 @@ def test_total_rows_matches_tenant_size() -> None:
             gw.close()
 
 
-def test_grouped_aggregate_applies_k_anonymity(acme_admin: QueryGateway) -> None:
+def test_grouped_aggregate_keeps_every_group_by_default(acme_admin: QueryGateway) -> None:
+    """The cohort floor is off, so no department is silently dropped."""
     result = acme_admin.run_spec(
         QuerySpec(
             metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],
             group_by=[Column.DEPARTMENT],
         )
     )
-    assert result.rewrites
+    assert len(result.rows) == 7, "acme has 7 departments; a group went missing"
     assert all(r["avg_salary"] is not None for r in result.rows)
 
 
-def test_single_person_aggregate_is_refused(acme_admin: QueryGateway) -> None:
-    """The differencing attack: an average over one person is that person's pay."""
-    with pytest.raises(CohortTooSmall):
+def test_grouped_aggregate_applies_k_anonymity_when_enabled(
+    acme_admin: QueryGateway, cohort_floor
+) -> None:
+    with cohort_floor(True):
+        result = acme_admin.run_spec(
+            QuerySpec(
+                metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],
+                group_by=[Column.DEPARTMENT],
+            )
+        )
+    assert result.rewrites
+
+
+def test_single_person_aggregate_is_allowed_by_default(acme_admin: QueryGateway) -> None:
+    """The cohort floor is off, so narrowing an aggregate onto one person works.
+
+    Recorded rather than hidden. This is the inference surface the floor used
+    to cover, deliberately scoped to future work alongside query budgets and
+    differential privacy -- see ENFORCE_MIN_COHORT in spec.py. It does not
+    touch the tenant boundary, which is enforced below the query layer.
+    """
+    result = acme_admin.run_spec(
+        QuerySpec(
+            metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],
+            filters=[Predicate(column=Column.NAME, op=Operator.EQ, value="ZZ_CANARY_ACME")],
+        )
+    )
+    assert result.rows[0]["avg_salary"] == 999999
+
+
+def test_single_person_aggregate_is_refused_when_the_floor_is_on(
+    acme_admin: QueryGateway, cohort_floor
+) -> None:
+    """The differencing defence still works; it is one flag away."""
+    with cohort_floor(True), pytest.raises(CohortTooSmall):
         acme_admin.run_spec(
             QuerySpec(
                 metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],
@@ -125,7 +158,6 @@ def test_sql_path_executes_valid_query(acme_admin: QueryGateway) -> None:
         "SELECT department, COUNT(*) AS n FROM employees GROUP BY department"
     )
     assert result.row_count > 0
-    assert "COUNT(*) >= 5" in result.sql.replace("  ", " ")
 
 
 # ----------------------------------------------------------- role policy ---
@@ -303,7 +335,7 @@ def test_median_reads_the_whole_tenant_not_the_spec_row_cap() -> None:
         assert got != pytest.approx(truncated)
 
 
-def test_grouped_median_drops_small_cohorts() -> None:
+def test_grouped_median_keeps_every_group_by_default() -> None:
     from secure_rls.security.spec import Aggregate, Metric
 
     gw = QueryGateway(authenticate("acme_admin", "acme123"))
@@ -314,18 +346,35 @@ def test_grouped_median_drops_small_cohorts() -> None:
                 group_by=[Column.DEPARTMENT],
             )
         )
+        assert len(result.rows) == 7
+    finally:
+        gw.close()
+
+
+def test_grouped_median_drops_small_cohorts_when_enabled(cohort_floor) -> None:
+    from secure_rls.security.spec import Aggregate, Metric
+
+    gw = QueryGateway(authenticate("acme_admin", "acme123"))
+    try:
+        with cohort_floor(True):
+            result = gw.run_spec(
+                QuerySpec(
+                    metrics=[Metric(agg=Aggregate.MEDIAN, column=Column.SALARY)],
+                    group_by=[Column.DEPARTMENT],
+                )
+            )
         assert result.rows
         assert any("k-anonymity" in r for r in result.rewrites)
     finally:
         gw.close()
 
 
-def test_median_over_one_person_is_refused() -> None:
+def test_median_over_one_person_is_refused_when_the_floor_is_on(cohort_floor) -> None:
     from secure_rls.security.spec import Aggregate, Metric
 
     gw = QueryGateway(authenticate("acme_admin", "acme123"))
     try:
-        with pytest.raises(CohortTooSmall):
+        with cohort_floor(True), pytest.raises(CohortTooSmall):
             gw.run_spec(
                 QuerySpec(
                     metrics=[Metric(agg=Aggregate.MEDIAN, column=Column.SALARY)],

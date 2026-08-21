@@ -22,6 +22,7 @@ from secure_rls.security.audit import AuditLog
 from secure_rls.security.output_guard import GuardVerdict, OutputGuard
 from secure_rls.security.principal import Principal
 from secure_rls.security.spec import (
+    ENFORCE_MIN_COHORT,
     GATEWAY_COMPUTED,
     MIN_COHORT_SIZE,
     QuerySpec,
@@ -182,10 +183,12 @@ class QueryGateway:
             summary = grouped.agg(
                 **{alias: lambda g: g.quantile(quantile), "count": "size"}
             ).reset_index()
-            summary = summary[summary["count"] >= MIN_COHORT_SIZE].drop(columns=["count"])
+            if ENFORCE_MIN_COHORT:
+                summary = summary[summary["count"] >= MIN_COHORT_SIZE]
+            summary = summary.drop(columns=["count"])
             out = summary.to_dict("records")
         else:
-            if len(frame) < MIN_COHORT_SIZE:
+            if ENFORCE_MIN_COHORT and len(frame) < MIN_COHORT_SIZE:
                 raise CohortTooSmall(
                     f"that statistic covers only {len(frame)} employee(s); at least "
                     f"{MIN_COHORT_SIZE} are required before a statistic can be reported"
@@ -203,7 +206,8 @@ class QueryGateway:
             rewrites=[
                 f"{metric.agg.value} computed by the gateway over {len(frame)} tenant "
                 f"rows (SQLite has no percentile functions)",
-                f"groups smaller than {MIN_COHORT_SIZE} dropped (k-anonymity)",
+                *([f"groups smaller than {MIN_COHORT_SIZE} dropped (k-anonymity)"]
+                  if ENFORCE_MIN_COHORT else []),
             ],
             verdict=verdict,
         )
@@ -212,6 +216,8 @@ class QueryGateway:
 
     def _require_cohort(self, spec: QuerySpec) -> None:
         """Block an ungrouped aggregate computed over fewer than k people."""
+        if not ENFORCE_MIN_COHORT:
+            return
         sql, params = cohort_size_query(spec)
         rows = self._db.execute(sql, params)
         n = int(rows[0]["n"]) if rows else 0
@@ -224,6 +230,8 @@ class QueryGateway:
 
     def _require_cohort_for_sql(self, guarded_sql: str) -> None:
         """Same rule for the SQL path, applied to the statement's own filter."""
+        if not ENFORCE_MIN_COHORT:
+            return
         lowered = guarded_sql.lower()
         where = ""
         if " where " in lowered:

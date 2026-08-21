@@ -82,27 +82,44 @@ def test_high_limit_is_lowered() -> None:
     assert any("lowered" in r for r in result.rewrites)
 
 
-def test_grouped_aggregate_gets_k_anonymity() -> None:
+def test_grouped_aggregate_is_not_floored_by_default(cohort_floor) -> None:
+    """The floor is off by default -- small departments stay in the result.
+
+    It silently dropped groups from every grouped answer, so a department of
+    four vanished from a chart and the numbers stopped adding up. That cost is
+    paid on every ordinary question; the inference attack it partly addresses
+    is scoped to future work. See ENFORCE_MIN_COHORT in spec.py.
+    """
     result = guard_sql("SELECT department, AVG(salary) FROM employees GROUP BY department")
+    assert "HAVING" not in result.sql.upper()
+    assert not any("k-anonymity" in r for r in result.rewrites)
+
+
+def test_grouped_aggregate_gets_k_anonymity_when_the_floor_is_on(cohort_floor) -> None:
+    """The capability is intact and one flag away."""
+    with cohort_floor(True):
+        result = guard_sql("SELECT department, AVG(salary) FROM employees GROUP BY department")
     assert f"COUNT(*) >= {MIN_COHORT_SIZE}" in result.sql.replace("  ", " ")
     assert any("k-anonymity" in r for r in result.rewrites)
 
 
-def test_k_anonymity_survives_a_trailing_comment() -> None:
+def test_k_anonymity_survives_a_trailing_comment(cohort_floor) -> None:
     """The rewrite is on the AST, so commenting out the tail cannot defeat it.
 
     This is the regression for the string-concatenation approach: appending
     ` HAVING COUNT(*) >= 5` as text to a statement ending in `--` is a no-op.
     """
     sql = "SELECT department, AVG(salary) FROM employees GROUP BY department --"
-    result = guard_sql(sql)
+    with cohort_floor(True):
+        result = guard_sql(sql)
     assert "HAVING" in result.sql.upper()
     assert f"COUNT(*) >= {MIN_COHORT_SIZE}" in result.sql.replace("  ", " ")
 
 
-def test_existing_having_is_preserved_and_extended() -> None:
+def test_existing_having_is_preserved_and_extended(cohort_floor) -> None:
     sql = "SELECT department, AVG(salary) FROM employees GROUP BY department HAVING AVG(salary) > 1"
-    result = guard_sql(sql)
+    with cohort_floor(True):
+        result = guard_sql(sql)
     upper = result.sql.upper()
     assert "AVG(SALARY) > 1" in upper.replace("  ", " ")
     assert f"COUNT(*) >= {MIN_COHORT_SIZE}" in result.sql.replace("  ", " ")
@@ -146,14 +163,26 @@ def test_spec_compiles_to_parameterised_sql() -> None:
     assert compiled.params == ["Engineering", 10]
 
 
-def test_spec_grouped_metric_gets_k_anonymity() -> None:
+def test_spec_grouped_metric_gets_k_anonymity(cohort_floor) -> None:
     spec = QuerySpec(
         metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],
         group_by=[Column.DEPARTMENT],
     )
-    compiled = compile_spec(spec)
+    with cohort_floor(True):
+        compiled = compile_spec(spec)
     assert f"HAVING COUNT(*) >= {MIN_COHORT_SIZE}" in compiled.sql
     assert compiled.k_anonymity_applied
+
+
+def test_spec_grouped_metric_has_no_floor_by_default() -> None:
+    compiled = compile_spec(
+        QuerySpec(
+            metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],
+            group_by=[Column.DEPARTMENT],
+        )
+    )
+    assert "HAVING" not in compiled.sql.upper()
+    assert not compiled.k_anonymity_applied
 
 
 # -- distinct ---------------------------------------------------------------
@@ -186,7 +215,6 @@ def test_group_by_with_a_metric_still_aggregates() -> None:
     )
     assert "GROUP BY department" in compiled.sql
     assert "DISTINCT" not in compiled.sql.upper()
-    assert f"COUNT(*) >= {MIN_COHORT_SIZE}" in compiled.sql
 
 
 def test_distinct_is_not_applied_to_a_plain_select() -> None:

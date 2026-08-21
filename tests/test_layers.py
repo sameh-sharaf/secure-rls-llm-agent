@@ -87,10 +87,11 @@ def test_unknown_table_is_attributed_to_l3() -> None:
         gw.close()
 
 
-def test_cohort_refusal_is_attributed_to_l3() -> None:
+def test_cohort_refusal_is_attributed_to_l3(cohort_floor) -> None:
+    """Only reachable with the k-anonymity floor on; it is off by default."""
     gw = _gateway("acme_admin")
     try:
-        with pytest.raises(CohortTooSmall) as caught:
+        with cohort_floor(True), pytest.raises(CohortTooSmall) as caught:
             gw.run_spec(
                 QuerySpec(
                     metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],

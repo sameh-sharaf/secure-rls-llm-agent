@@ -23,9 +23,28 @@ from secure_rls.security.layers import Layer, tag
 #:
 #: RLS answers "which rows may you read". It says nothing about "how precisely
 #: may you summarise them", and an average over one person is that person's
-#: salary. This is the differencing-attack defence, and it is a k-anonymity
-#: problem rather than an access-control one.
+#: salary. That is a k-anonymity problem rather than an access-control one, and
+#: it is the difference between protecting *rows* and protecting *inference*.
 MIN_COHORT_SIZE = 5
+
+#: Whether to enforce it. **Off by default, deliberately.**
+#:
+#: A cohort floor silently drops small groups from every grouped result, so a
+#: department of four vanishes from a chart and the numbers stop adding up.
+#: That cost is paid on every ordinary question, while the attack it prevents
+#: -- narrowing an aggregate onto one person -- is a statistical-inference
+#: problem that a cohort floor only partially addresses anyway. Scoped out of
+#: this project and recorded as future work, where it belongs alongside query
+#: budgets and differential privacy.
+#:
+#: What this does NOT relax: the tenant boundary, which is enforced below the
+#: query layer and is unaffected, and `EXTREMAL_AGGREGATES` below, which is a
+#: role control rather than an inference one.
+#:
+#: The honest consequence, stated rather than buried: with this off, a role
+#: barred from reading an individual salary can still reach one by narrowing an
+#: average onto a single person. Set to True to restore the floor.
+ENFORCE_MIN_COHORT = False
 
 
 class Column(StrEnum):
@@ -285,7 +304,7 @@ def compile_spec(
     # metric, SELECT DISTINCT above already expresses the question.
     if spec.group_by and spec.metrics:
         sql += " GROUP BY " + ", ".join(c.value for c in spec.group_by)
-        if spec.metrics:
+        if spec.metrics and ENFORCE_MIN_COHORT:
             # Grouped aggregates get a minimum cohort size, always. A group of
             # one is an individual disclosure wearing an aggregate's clothes.
             sql += f" HAVING COUNT(*) >= {MIN_COHORT_SIZE}"

@@ -157,14 +157,15 @@ def test_custom_chart_combines_two_series_on_two_axes(context: ToolContext) -> N
     assert "yaxis2" in figure.layout, "second series was not put on a secondary axis"
 
 
-def test_custom_chart_is_one_query_with_k_anonymity(context: ToolContext) -> None:
+def test_custom_chart_is_one_query(context: ToolContext) -> None:
+    """Series share a query; a chart is not N round trips."""
     tools = {t.name: t for t in build_tools(context)}
     tools["plot_chart"].invoke(
         {"x": "department", "series": [{"metric": "avg"}, {"metric": "count"}]}
     )
     sql = context.artifacts[-1].sql
     assert sql.count("SELECT") == 1, "series should share a single grouped query"
-    assert "COUNT(*) >= 5" in sql
+    assert "GROUP BY department" in sql
 
 
 def test_custom_chart_obeys_the_role_policy() -> None:

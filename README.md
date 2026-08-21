@@ -42,7 +42,7 @@ Five layers. One of them is the boundary; the rest are defence in depth.
 |---|---|---|---|
 | **L1** | Identity binding (`security/principal.py`) | `Principal` built at login from the server-side session. Never a tool argument, never in a prompt as something rewritable, never round-tripped through the browser. | n/a — supplies the identity |
 | **L2** | Tool contract (`tools/factory.py`) | Tools are closures over a gateway built from the principal. **No tool takes a tenant parameter.** Pydantic schemas set `extra="forbid"`. | n/a — removes the vocabulary |
-| **L3** | Query gateway (`security/spec.py`, `sql_guard.py`) | Typed specs compile to parameterised SQL. Model-written SQL is validated on the sqlglot AST and rewritten for row limits and k-anonymity. | **Yes** — while its allowlist is complete |
+| **L3** | Query gateway (`security/spec.py`, `sql_guard.py`) | Typed specs compile to parameterised SQL. Model-written SQL is validated on the sqlglot AST and rewritten for row limits. A k-anonymity floor is implemented and off by default (see Known limitations). | **Yes** — while its allowlist is complete |
 | **L4** | **Database enforcement (`db.py`)** | **A per-connection temp table holding only this tenant's rows, plus an authorizer denying `employees_base` unconditionally.** | **Yes — and it anticipates nothing** |
 | **L5** | Output guard + audit (`security/output_guard.py`, `audit.py`) | Verifies every result against a *privileged* id set, scans for foreign canaries, raises rather than filters, hash-chains the audit log. | **Yes** — detects rather than prevents |
 
@@ -461,9 +461,18 @@ mistaken for the boundary is how systems get misjudged as safe.
   at 500 rows and wrong at 5 million. On a real platform this layer is native
   RLS — Postgres policies, Snowflake row access policies, Unity Catalog row
   filters — and the copy disappears. ADR-0004 sketches the Postgres profile.
-- **k = 5 is a blunt instrument.** It stops the obvious differencing attack, not
-  a patient analyst issuing many queries. Real defence needs a query budget or
-  differential privacy.
+- **Inference protection is out of scope, deliberately.** A k-anonymity floor
+  (`ENFORCE_MIN_COHORT` in `spec.py`) is implemented, tested in both states, and
+  **off by default**. It silently dropped small groups from every grouped
+  answer -- a department of four vanished from a chart and the numbers stopped
+  adding up -- and it paid that cost on every ordinary question to partially
+  address an attack that properly needs query budgets or differential privacy.
+
+  The consequence, stated rather than buried: an aggregate can be narrowed onto
+  one person, so a role barred from reading an individual salary can still
+  infer one that way. What this does *not* touch is the tenant boundary, which
+  is enforced below the query layer, or the `MIN`/`MAX` rule, which is a role
+  control and stays on. One flag restores the floor.
 - **No hosted demo.** A 7B model needs hardware free tiers do not provide, and
   swapping in a hosted API would contradict the offline requirement. `docker
   compose up` is the intended reproducible path; the Azure Container Apps
