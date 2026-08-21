@@ -38,6 +38,59 @@ st.set_page_config(page_title="Secure RLS Analyst", page_icon="•", layout="wid
 
 STATUS_ICON = {"ok": "🟢", "refused": "🟡", "blocked": "🔴", "info": "⚪"}
 
+# Streamlit's built-in busy indicators animate a rotating set of emoji (the
+# running man and friends) in the top-right status widget and inside
+# `st.spinner`. On a page about row-level security they read as noise, and on a
+# 30-second model call they are on screen for a long time. Replaced with a
+# plain rotating ring: the status widget is hidden, and any icon Streamlit puts
+# inside a spinner is swapped for a CSS-drawn circle.
+#
+# Selectors are deliberately broad -- Streamlit's internal markup is not a
+# public API, so this targets the testid, the emoji span and the icon element
+# together rather than betting on one of them surviving an upgrade. If a future
+# version changes all three, the page degrades to Streamlit's default, which is
+# cosmetic rather than broken.
+st.markdown(
+    """
+    <style>
+      [data-testid="stStatusWidget"] { display: none !important; }
+
+      [data-testid="stSpinnerIcon"],
+      [data-testid="stSpinner"] > div > i,
+      [data-testid="stSpinner"] [data-testid="stIconEmoji"],
+      [data-testid="stSpinner"] span[role="img"],
+      .stSpinner > div > i { display: none !important; }
+
+      [data-testid="stSpinner"] > div,
+      .stSpinner > div {
+        display: flex !important;
+        align-items: center;
+        gap: 0.6rem;
+      }
+
+      [data-testid="stSpinner"] > div::before,
+      .stSpinner > div::before {
+        content: "";
+        flex: 0 0 auto;
+        width: 1.05rem;
+        height: 1.05rem;
+        border-radius: 50%;
+        border: 2px solid rgba(128, 128, 128, 0.28);
+        border-top-color: currentColor;
+        animation: rls-spin 0.7s linear infinite;
+      }
+
+      @keyframes rls-spin { to { transform: rotate(360deg); } }
+
+      @media (prefers-reduced-motion: reduce) {
+        [data-testid="stSpinner"] > div::before,
+        .stSpinner > div::before { animation-duration: 2.4s; }
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # --------------------------------------------------------------------- setup
 
@@ -65,6 +118,58 @@ def get_session():
             st.session_state.session, model=st.session_state.get("model", DEFAULT_MODEL)
         )
     return st.session_state.session
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def available_models() -> list[str]:
+    """Tool-capable models Ollama has locally.
+
+    Filtered on the `tools` capability: a model without it cannot drive this
+    agent at all, and offering it in the picker only produces a confusing
+    failure two clicks later.
+    """
+    try:
+        import ollama
+
+        names = [m.model for m in ollama.list().models if m.model]
+    except Exception:
+        return [DEFAULT_MODEL]
+
+    capable = []
+    for name in names:
+        try:
+            info = ollama.show(name)
+            caps = getattr(info, "capabilities", None) or []
+            if "tools" in caps:
+                capable.append(name)
+        except Exception as exc:  # noqa: BLE001 - one bad model must not hide the rest
+            print(f"skipping model {name!r}: {type(exc).__name__}: {exc}")
+    return capable or [DEFAULT_MODEL]
+
+
+def render_model_picker() -> None:
+    """Switch models mid-session without losing the conversation.
+
+    Only the agent is rebuilt. The session, gateway and tools stay bound to the
+    same principal, so switching models cannot widen what is reachable -- which
+    is the same argument the bake-off makes, made clickable.
+    """
+    models = available_models()
+    current = st.session_state.get("model", DEFAULT_MODEL)
+    if current not in models:
+        current = models[0]
+
+    chosen = st.selectbox(
+        "Model",
+        models,
+        index=models.index(current),
+        help="Local models with tool support. Switching keeps your conversation.",
+    )
+    if chosen != st.session_state.get("model"):
+        st.session_state.model = chosen
+        # Rebuild only the agent; the tenant binding lives in the session.
+        st.session_state.agent = SecureAgent(st.session_state.session, model=chosen)
+        st.rerun()
 
 
 def logout() -> None:
@@ -101,19 +206,18 @@ def render_login() -> None:
 
     with right:
         st.subheader("Demo accounts")
+        # Passwords are documented in the README, not printed next to the
+        # usernames. Putting credentials on the sign-in screen makes a
+        # screenshot of this page a credential dump.
         st.dataframe(
             pd.DataFrame(
                 [
-                    {"username": u, "organisation": t, "role": r, "password": f"{t}123"}
+                    {"username": u, "organisation": t, "role": r}
                     for u, t, r in demo_accounts()
                 ]
             ),
             hide_index=True,
             width="stretch",
-        )
-        st.caption(
-            "Sign in as two different organisations in two browser tabs to see the "
-            "isolation directly."
         )
 
 
@@ -149,7 +253,18 @@ def render_artifacts(artifacts: list) -> None:
 
 
 def render_chat(session) -> None:
+    """Transcript first, input last -- the ordinary chat shape.
+
+    The previous version rendered the new exchange *after* the input widget,
+    so each answer appeared below the box you had just typed into and the
+    conversation read backwards. Here every completed turn lives in
+    `st.session_state.history`, the whole transcript is drawn, and the input
+    is the last element on the page. A pending question is parked in state and
+    answered on the next run, so the user's message and the spinner both show
+    up above the box while the model is working.
+    """
     st.subheader("Ask about your workforce")
+
     for entry in st.session_state.get("history", []):
         with st.chat_message("user"):
             st.write(entry["question"])
@@ -160,28 +275,25 @@ def render_chat(session) -> None:
                     render_trace(entry["trace"])
             render_artifacts(entry.get("artifacts", []))
 
-    prompt = st.chat_input("e.g. Which department has the highest average salary?")
-    if not prompt:
-        return
+    pending = st.session_state.pop("pending_question", None)
+    if pending:
+        with st.chat_message("user"):
+            st.write(pending)
+        with st.chat_message("assistant"), st.spinner("Planning, querying, checking…"):
+            reply = st.session_state.agent.ask(pending)
+        st.session_state.history.append(
+            {
+                "question": pending,
+                "answer": reply.answer,
+                "trace": reply.trace,
+                "artifacts": reply.artifacts,
+            }
+        )
+        st.rerun()
 
-    with st.chat_message("user"):
-        st.write(prompt)
-    with st.chat_message("assistant"):
-        with st.spinner("Planning, querying, checking…"):
-            reply = st.session_state.agent.ask(prompt)
-        st.write(reply.answer)
-        with st.expander("Reasoning, tools and executed SQL", expanded=True):
-            render_trace(reply.trace)
-        render_artifacts(reply.artifacts)
-
-    st.session_state.history.append(
-        {
-            "question": prompt,
-            "answer": reply.answer,
-            "trace": reply.trace,
-            "artifacts": reply.artifacts,
-        }
-    )
+    if prompt := st.chat_input("e.g. Which department has the highest average salary?"):
+        st.session_state.pending_question = prompt
+        st.rerun()
 
 
 # ------------------------------------------------------------------ security
@@ -304,7 +416,7 @@ def main() -> None:
             f"**Rows visible** `{session.gateway.total_rows()}`"
         )
         st.divider()
-        st.caption(f"Model: `{st.session_state.get('model', DEFAULT_MODEL)}`")
+        render_model_picker()
         if principal.role.value == "analyst":
             st.info(
                 "As an analyst you may compute salary statistics but may not read an "
