@@ -615,6 +615,36 @@ class SecureAgent:
 
     # --------------------------------------------------------------- api ---
 
+    def restore(self, turns: list, *, thread: str = "default") -> int:
+        """Seed a thread from a persisted transcript.
+
+        Without this, restored history is decoration: the page redraws the old
+        conversation but the model starts blind, so "compare that to Marketing"
+        after a refresh refers to nothing. Replaying the turns as message pairs
+        puts them back in the model's context.
+
+        Only question and answer text are replayed -- not tool calls, not result
+        tables. Those are re-derivable by asking again, and every stored copy of
+        a result row is another copy of tenant data.
+        """
+        if not turns:
+            return 0
+        config = {"configurable": {"thread_id": self.session.principal.cache_key(thread)}}
+        if self.graph.get_state(config).values.get("messages"):
+            return 0  # already populated; do not double up
+
+        messages: list[AnyMessage] = []
+        for turn in turns:
+            question = getattr(turn, "question", "")
+            answer = getattr(turn, "answer", "")
+            if question and answer:
+                messages.append(HumanMessage(content=question))
+                messages.append(AIMessage(content=answer))
+        if not messages:
+            return 0
+        self.graph.update_state(config, {"messages": messages, "turn_start": len(messages)})
+        return len(messages) // 2
+
     def ask(self, question: str, *, thread: str = "default") -> AgentAnswer:
         """Run one turn. Returns the answer plus the full reasoning trace."""
         started = time.perf_counter()

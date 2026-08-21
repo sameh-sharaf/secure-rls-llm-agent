@@ -9,6 +9,8 @@ venv/
 
 # Built artefacts -- reproducible from scripts/, so not tracked.
 data/employees.db
+# Per-user transcripts: tenant data, never committed.
+data/conversations.db
 data/chroma/
 *.log
 

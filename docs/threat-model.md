@@ -70,6 +70,7 @@ case where that reasoning failed. L4 anticipates nothing.
 | 21 | Derived-data leakage | Anomaly scores fitted across all tenants | L2 | The IQR fence is fitted on the tenant's rows only |
 | 21b | **Extremal aggregate disclosure** | Analyst asks `MAX(salary)` | L3 | `MIN`/`MAX` on a masked column are treated as row-level reads. They pass every cohort-size check and still report one person's exact value |
 | 21c | **Prompt side-channel** | Sample rows in the system prompt carry masked columns | L1+L3 | `sample_rows()` applies the role's column policy. The prompt is an output too |
+| 21d | **Persisted transcript** | Saved chat history replayed to the wrong user, or after a role change | L1 | Scoped by tenant *and* username *and* role; redacted before writing; capped per user; erasable. A transcript is a new copy of tenant data and gets the same treatment as the table |
 | 22 | Error message leakage | A stack trace naming the base table | L5 | Database errors are sanitised before they reach the model or the screen |
 | 23 | Output leakage | The model paraphrases a row it should not hold | L5 | Result sets verified against a privileged id set; canary strings scanned in generated prose |
 | 24 | Audit tampering | Removing evidence of a leak | L5 | Entries are hash-chained; `verify()` fails if one is altered |

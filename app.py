@@ -114,10 +114,18 @@ def get_session():
     if principal is None:
         return None
     if st.session_state.get("session") is None:
-        st.session_state.session = build_session(principal)
-        st.session_state.agent = SecureAgent(
-            st.session_state.session, model=st.session_state.get("model", DEFAULT_MODEL)
-        )
+        session = build_session(principal)
+        agent = SecureAgent(session, model=st.session_state.get("model", DEFAULT_MODEL))
+        # Restore this user's own transcript, and replay it into the model's
+        # memory so a follow-up question after a refresh still has context.
+        turns = session.conversations.load(principal) if session.conversations else []
+        agent.restore(turns)
+        st.session_state.history = [
+            {"question": t.question, "answer": t.answer, "trace": t.trace, "artifacts": []}
+            for t in turns
+        ]
+        st.session_state.session = session
+        st.session_state.agent = agent
     return st.session_state.session
 
 
@@ -200,7 +208,6 @@ def render_login() -> None:
         if submitted:
             try:
                 st.session_state.principal = authenticate(username, password)
-                st.session_state.history = []
                 st.rerun()
             except AuthenticationError as exc:
                 st.error(str(exc))
@@ -293,6 +300,12 @@ def render_chat(session) -> None:
                 "artifacts": reply.artifacts,
             }
         )
+        if session.conversations:
+            # Artifacts are deliberately not persisted: large, re-derivable by
+            # asking again, and each one is another copy of tenant data.
+            session.conversations.append(
+                session.principal, pending, reply.answer, reply.trace
+            )
         st.rerun()
 
     if prompt := st.chat_input("e.g. Which department has the highest average salary?"):
@@ -441,6 +454,19 @@ def main() -> None:
                 "individual's salary. Sign in as an admin to compare."
             )
         st.divider()
+        stored = session.conversations.count(principal) if session.conversations else 0
+        st.caption(f"Saved conversation: {stored} turn(s)")
+        if stored and st.button("Clear my history"):
+            # Erasure is deliberately available and deliberately scoped. A
+            # transcript of HR answers with no way to delete it is a compliance
+            # problem wearing a feature's clothes.
+            removed = session.conversations.clear(principal)
+            st.session_state.history = []
+            st.session_state.agent = SecureAgent(
+                session, model=st.session_state.get("model", DEFAULT_MODEL)
+            )
+            st.toast(f"Deleted {removed} turn(s).")
+            st.rerun()
         if st.button("Sign out"):
             logout()
             st.rerun()

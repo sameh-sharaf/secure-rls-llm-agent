@@ -19,6 +19,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from db import DB_PATH
 from secure_rls.rag.retriever import CHROMA_PATH, TenantNotesRetriever
 from secure_rls.security.audit import AuditLog
+from secure_rls.security.conversation import STORE_PATH, ConversationStore
 from secure_rls.security.gateway import QueryGateway
 from secure_rls.security.principal import Principal
 from secure_rls.tools.factory import ToolContext, build_tools
@@ -41,6 +42,9 @@ class Session:
     #: model swap. It stays keyed by (thread, tenant), so this shares history
     #: across models, never across tenants.
     checkpointer: InMemorySaver = field(default_factory=InMemorySaver)
+    #: Per-user transcript, persisted across restarts. Scoped to this
+    #: principal -- see secure_rls/security/conversation.py.
+    conversations: ConversationStore | None = None
 
     @property
     def tool_map(self) -> dict:
@@ -55,6 +59,7 @@ def build_session(
     *,
     db_path: Path = DB_PATH,
     chroma_path: Path = CHROMA_PATH,
+    store_path: Path = STORE_PATH,
     with_rag: bool = True,
 ) -> Session:
     audit = AuditLog()
@@ -74,6 +79,7 @@ def build_session(
     context = ToolContext(gateway=gateway, retriever=retriever)
     tools = build_tools(context)
     return Session(
+        conversations=ConversationStore(store_path),
         principal=principal,
         gateway=gateway,
         context=context,
