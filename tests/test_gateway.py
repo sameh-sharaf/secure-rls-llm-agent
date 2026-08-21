@@ -202,6 +202,47 @@ def test_unmasked_columns_are_unaffected(acme_analyst: QueryGateway) -> None:
     assert result.rows
 
 
+# -- the prompt is an output too ---------------------------------------------
+# Found by the bake-off: sample rows injected into the system prompt bypassed
+# the column mask entirely, so an analyst was handed three real salaries before
+# asking anything. llama3.1 read one off the prompt and reported it as the
+# highest salary. The boundary was enforced on the query path and leaked around
+# through a side channel built alongside it.
+
+
+def test_sample_rows_respect_the_column_mask(acme_analyst: QueryGateway) -> None:
+    rows = acme_analyst.sample_rows(3)
+    assert rows
+    for row in rows:
+        assert row["salary"] == QueryGateway.MASKED_PLACEHOLDER
+        assert row["name"]  # unmasked columns still come through
+
+
+def test_sample_rows_are_unmasked_for_an_admin(acme_admin: QueryGateway) -> None:
+    rows = acme_admin.sample_rows(3)
+    assert all(isinstance(r["salary"], int) for r in rows)
+
+
+def test_no_real_salary_reaches_an_analyst_system_prompt() -> None:
+    """The whole prompt, checked against every real salary in the tenant."""
+    import pandas as pd
+
+    from agent import system_prompt
+    from db import CSV_PATH
+    from secure_rls.session import build_session
+
+    frame = pd.read_csv(CSV_PATH)
+    acme_salaries = {str(int(s)) for s in frame[frame.tenant_id == "acme"].salary}
+
+    session = build_session(authenticate("acme_analyst", "acme123"), with_rag=False)
+    try:
+        prompt = system_prompt(session).replace(",", "")
+        found = sorted(s for s in acme_salaries if s in prompt)
+        assert not found, f"individual salaries leaked into the analyst prompt: {found}"
+    finally:
+        session.close()
+
+
 def test_admin_can_read_individual_salary(acme_admin: QueryGateway) -> None:
     result = acme_admin.run_spec(QuerySpec(select=[Column.NAME, Column.SALARY], limit=5))
     assert all("salary" in r for r in result.rows)

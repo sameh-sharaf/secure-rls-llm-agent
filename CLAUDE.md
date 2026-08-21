@@ -34,6 +34,18 @@ project exists to demonstrate.
 5. **The output guard raises; it never filters.** Silently removing an
    offending row would hide the bug that produced it.
 
+5b. **Every path that shows a value is an output, including the prompt.**
+   Sample rows injected into the system prompt, rows rendered in the UI, and
+   rows returned by a tool are all subject to the role's column policy. Apply
+   the mask in `QueryGateway`, where every caller goes through it, never in the
+   caller. A boundary enforced on the query path and bypassed by a side channel
+   built alongside it is not a boundary.
+
+5c. **`MIN` and `MAX` are row-level reads wearing an aggregate's clothes.**
+   They select one row's value rather than combining many, so on a masked
+   column they disclose an individual and no cohort-size rule will catch it.
+   See `EXTREMAL_AGGREGATES` in `spec.py`.
+
 6. **Every new tool needs a red-team case** in `evals/redteam.yaml` before it
    merges, and a unit test asserting its schema carries no tenant parameter.
 

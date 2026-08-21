@@ -265,6 +265,29 @@ individual's value, but "the median earner" is not an identity anyone can
 target. That is a judgement call, and it is written down rather than left
 implicit.
 
+#### …and then a worse one, three feet away
+
+With `MAX` closed, `llama3.1` still answered the same question with
+**€163,500** — a real acme salary. It was not hallucinating. It was reciting
+its own system prompt.
+
+`sample_rows()` injects three real employees into every prompt to ground the
+model's idea of the schema. It did not apply the column mask, so an analyst
+barred from reading individual salaries was handed three of them *before asking
+anything* — and the same unmasked rows were rendered in the UI.
+
+The boundary was enforced carefully on the query path and leaked around through
+a side channel built alongside it. The masking now lives in `QueryGateway.
+sample_rows()`, the one method every caller goes through, and a test asserts
+that **no real salary from the tenant appears anywhere in an analyst's system
+prompt** — checked against all 500 of them, rather than against the three that
+happened to be sampled.
+
+The general lesson is now invariant 5b in `CLAUDE.md`: *every path that shows a
+value is an output, including the prompt.* Neither of these two bugs was found
+by design review, by the red-team suite, or by 157 passing tests. Both were
+found by running a weaker model and reading what it said.
+
 ### Ablation: which layer is actually load-bearing?
 
 `python -m evals.ablation` fires the attack straight at the query gateway with

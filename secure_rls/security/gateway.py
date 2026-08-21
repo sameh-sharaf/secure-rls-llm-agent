@@ -286,8 +286,38 @@ class QueryGateway:
         """The independent id set, for binding into the retriever's post-check."""
         return self._guard.allowed_user_ids
 
+    #: Shown in place of a value the caller's role may not read.
+    MASKED_PLACEHOLDER = "<restricted for your role>"
+
     def sample_rows(self, n: int = 3) -> list[dict]:
-        return self._db.sample(n)
+        """A few of the tenant's own rows, with the role's column policy applied.
+
+        These rows are injected into the system prompt to ground the model's
+        idea of the schema, and they are also rendered in the UI. Both are
+        *outputs*, and both were bypassing the column mask.
+
+        The bug this prevents was found by the model bake-off and is worth
+        stating plainly: an analyst -- a role explicitly barred from reading an
+        individual's salary -- had three real employees' salaries handed to them
+        in the system prompt before asking anything. Asked for the highest
+        salary, llama3.1 answered a real one. It was not hallucinating; it was
+        reciting its own prompt.
+
+        The boundary was enforced carefully on the query path and then leaked
+        around through a side channel built alongside it. Masking belongs here,
+        in the one method every caller goes through, rather than in each caller.
+        """
+        masked = self.principal.policy.masked_columns()
+        rows = self._db.sample(n)
+        if not masked:
+            return rows
+        return [
+            {
+                key: (self.MASKED_PLACEHOLDER if key in masked else value)
+                for key, value in row.items()
+            }
+            for row in rows
+        ]
 
     def total_rows(self) -> int:
         return self._db.row_count()
