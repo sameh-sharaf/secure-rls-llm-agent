@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+
+# Built artefacts -- reproducible from scripts/, so not tracked.
+data/employees.db
+data/chroma/
+evals/results/
+*.log
+
+.env
+.DS_Store
+.idea/
+.vscode/

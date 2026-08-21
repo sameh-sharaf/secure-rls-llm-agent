@@ -1,0 +1,29 @@
+[project]
+name = "secure-rls"
+version = "0.1.0"
+description = "A conversational data analyst agent with row-level security the LLM cannot bypass"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "S"]
+ignore = [
+    "S101",  # assert is fine in tests and in security invariants
+    "E501",  # long lines are handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+"scripts/*" = ["S"]
+# db.py interpolates only module-level constants into SQL, never user input.
+"db.py" = ["S608"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: requires a running Ollama model",
+]
