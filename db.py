@@ -45,8 +45,9 @@ docs/adr/0004-postgres-parity.md).
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "employees.db"
@@ -308,7 +309,7 @@ class TenantDatabase:
     def close(self) -> None:
         self._conn.close()
 
-    def __enter__(self) -> "TenantDatabase":
+    def __enter__(self) -> TenantDatabase:
         return self
 
     def __exit__(self, *exc: object) -> None:
