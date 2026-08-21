@@ -201,6 +201,19 @@ _OFF_TOPIC = re.compile(
 )
 
 #: Phrases that ask for a scope wider than the caller's own organisation.
+#: Attempts to overwrite the operator's instructions.
+#:
+#: Catching these is a *labelling* improvement, not a security one -- the tools
+#: could not have crossed a boundary either way. It exists so the refusal names
+#: a layer instead of arriving as an unattributed sentence from the model, and
+#: so the answer explains that the policy is not the thing holding the line.
+_INSTRUCTION_OVERRIDE = re.compile(
+    r"\b(ignore|forget|disregard|override|bypass|drop)\b[^.]{0,40}\b"
+    r"(previous|prior|earlier|above|all|any|your|the)\b[^.]{0,30}\b"
+    r"(instruction|rule|polic|prompt|constraint|restriction|guardrail|system)",
+    re.I,
+)
+
 _GLOBAL_SCOPE = re.compile(
     r"\b(every|all|each|other|another|any)\s+"
     r"(compan(y|ies)|organisation|organization|tenant|client|customer|firm)s?\b"
@@ -277,6 +290,27 @@ class SecureAgent:
                 "trace": fresh + [step("refuse", "Out of scope", status="refused", layer="L1 identity & role policy")],
             }
 
+        if _INSTRUCTION_OVERRIDE.search(question):
+            return {
+                "refusal_reason": (
+                    "I can't drop my instructions — but that is not what protects your "
+                    "colleagues' data anyway. The database connection this session holds "
+                    "contains only your own organisation's rows, so the instructions are "
+                    "the weakest control here, not the boundary. Ask a question about "
+                    "your own organisation and I will answer it."
+                ),
+                "rejections": ["__reset__"],
+                "trace": fresh
+                + [
+                    step(
+                        "refuse",
+                        "Instruction-override attempt",
+                        status="refused",
+                        layer="L1 identity & role policy",
+                    )
+                ],
+            }
+
         if _looks_cross_tenant(question, tenant):
             # Not a security decision -- the tools could not have crossed the
             # boundary anyway. This just gives a clearer answer than an empty
@@ -295,6 +329,17 @@ class SecureAgent:
 
         return {
             "attempts": 0,
+            # Clear any refusal left over from a previous turn.
+            #
+            # `refusal_reason` is checkpointed like everything else in graph
+            # state, and the checkpointer is what gives us multi-turn memory.
+            # Without this line the value survives, `_after_route` sees it on
+            # the next turn and routes straight to `refuse` -- so a single
+            # out-of-scope question permanently broke the session and every
+            # later question, however ordinary, was refused. `route` is the one
+            # node that runs on every turn, which makes it the right place to
+            # reset per-turn state.
+            "refusal_reason": "",
             "rejections": ["__reset__"],
             "trace": fresh + [step("route", "In scope", status="ok")],
         }

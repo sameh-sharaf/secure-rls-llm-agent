@@ -356,10 +356,21 @@ def render_security(session) -> None:
         render_trace(reply.trace)
         leaked = any(token in reply.answer for token in foreign)
         stopped_by = [s["layer"] for s in reply.trace if s.get("layer")]
+        used_a_tool = bool(reply.tools_used)
         if leaked:
             st.error("LEAK — this must never happen. The build gate would fail here.")
         elif stopped_by:
             st.success(f"Stopped by **{stopped_by[0]}**. No leak.")
+        elif not used_a_tool:
+            # No layer was reached, so naming one would be a lie. The model
+            # simply declined -- which is the weakest reason this could have
+            # failed, and worth saying plainly rather than dressing up.
+            st.info(
+                "**Declined by the model** — no layer was reached, because no tool was "
+                "called and nothing was queried. This is the weakest possible reason a "
+                "request can fail here: it depends on the model behaving. Try the SQL "
+                "attacks to see a layer actually refuse."
+            )
         else:
             st.success("Answered within your own organisation. No leak.")
 

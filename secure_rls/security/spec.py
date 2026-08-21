@@ -137,6 +137,14 @@ class QuerySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     select: list[Column] = Field(default_factory=list)
+    #: Return unique combinations of the selected columns.
+    #:
+    #: Without this, "what departments are there?" has no representation: a
+    #: spec needs a select or a metric, and `group_by` alone was rejected -- so
+    #: the model bolted a COUNT onto the question to make the request valid and
+    #: answered something nobody asked. A missing verb in the query language
+    #: shows up as the model doing something odd, not as an error.
+    distinct: bool = False
     metrics: list[Metric] = Field(default_factory=list)
     filters: list[Predicate] = Field(default_factory=list)
     group_by: list[Column] = Field(default_factory=list)
@@ -204,8 +212,8 @@ def compile_spec(
     reach it -- `QuerySpec.limit` is still capped at 200 by validation, and
     this argument is keyword-only and never populated from tool input.
     """
-    if not spec.select and not spec.metrics:
-        raise SpecError("a query must select at least one column or metric")
+    if not spec.select and not spec.metrics and not spec.group_by:
+        raise SpecError("a query must select at least one column, metric or grouping")
 
     aggregate_only = bool(spec.metrics) and not spec.select
 
@@ -237,12 +245,17 @@ def compile_spec(
     projections += [c.value for c in spec.select if c not in spec.group_by]
     projections += [m.sql() for m in spec.metrics]
 
+    # `group_by` with no metric is a request for the distinct values of those
+    # columns, which is what "what departments are there?" means.
+    distinct = spec.distinct or (bool(spec.group_by) and not spec.metrics)
+    keyword = "SELECT DISTINCT" if distinct and not spec.metrics else "SELECT"
+
     # ruff flags f-string SQL construction, correctly in general. It is safe
     # here for a reason worth stating rather than silencing globally: every
     # element of `projections` originates from the `Column` / `Aggregate` enums
     # or from `Metric.output_name()`, which is alphanumeric-checked. No value
     # the model produced reaches this string -- values are bound below.
-    sql = f"SELECT {', '.join(projections)} FROM employees"  # noqa: S608
+    sql = f"{keyword} {', '.join(projections)} FROM employees"  # noqa: S608
     params: list[Any] = []
 
     if spec.filters:
@@ -254,7 +267,9 @@ def compile_spec(
         sql += " WHERE " + " AND ".join(clauses)
 
     k_applied = False
-    if spec.group_by:
+    # GROUP BY only earns its place when something is being aggregated; with no
+    # metric, SELECT DISTINCT above already expresses the question.
+    if spec.group_by and spec.metrics:
         sql += " GROUP BY " + ", ".join(c.value for c in spec.group_by)
         if spec.metrics:
             # Grouped aggregates get a minimum cohort size, always. A group of

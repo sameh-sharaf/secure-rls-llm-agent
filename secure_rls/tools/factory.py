@@ -107,6 +107,14 @@ class QueryEmployeesArgs(_Base):
     select: list[Column] = Field(
         default_factory=list, description="Columns to return for individual employees"
     )
+    distinct: bool = Field(
+        default=False,
+        description=(
+            "Return only unique values of the selected columns. Use this for "
+            "'what departments are there', 'which job titles exist' and similar -- "
+            "do not add a count unless a count was asked for."
+        ),
+    )
     metrics: list[Literal["count", "avg", "sum", "min", "max", "median"]] = Field(
         default_factory=list, description="Aggregates to compute"
     )
@@ -224,6 +232,7 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
         args = QueryEmployeesArgs(**kwargs)
         spec = QuerySpec(
             select=args.select,
+            distinct=args.distinct,
             metrics=[
                 Metric(agg=Aggregate(m), column=args.metric_column) for m in args.metrics
             ],
@@ -404,7 +413,9 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
             name="query_employees",
             description=(
                 "Read employee records for your organisation. Use `select` for individual "
-                "rows, or `metrics` with `group_by` for aggregates. Prefer this over raw SQL."
+                "rows, `select` with `distinct` for the unique values of a column, or "
+                "`metrics` with `group_by` for aggregates. Answer the question asked: "
+                "listing what exists is not the same as counting it. Prefer this over raw SQL."
             ),
             args_schema=QueryEmployeesArgs,
         ),

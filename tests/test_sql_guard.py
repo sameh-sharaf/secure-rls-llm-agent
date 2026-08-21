@@ -156,6 +156,60 @@ def test_spec_grouped_metric_gets_k_anonymity() -> None:
     assert compiled.k_anonymity_applied
 
 
+# -- distinct ---------------------------------------------------------------
+# "What departments are there?" had no representation: a spec needed a select
+# or a metric, and group_by alone was rejected -- so the model bolted a COUNT
+# onto the question to make the request valid and answered something nobody
+# asked. A missing verb in the query language shows up as the model behaving
+# oddly, not as an error.
+
+
+def test_distinct_selects_unique_values() -> None:
+    compiled = compile_spec(QuerySpec(select=[Column.DEPARTMENT], distinct=True))
+    assert compiled.sql.startswith("SELECT DISTINCT department FROM employees")
+    assert "COUNT" not in compiled.sql.upper()
+
+
+def test_group_by_without_a_metric_means_distinct() -> None:
+    """The shape a model naturally reaches for when listing values."""
+    compiled = compile_spec(QuerySpec(group_by=[Column.DEPARTMENT]))
+    assert compiled.sql.startswith("SELECT DISTINCT department FROM employees")
+    assert "GROUP BY" not in compiled.sql.upper()
+
+
+def test_group_by_with_a_metric_still_aggregates() -> None:
+    compiled = compile_spec(
+        QuerySpec(
+            metrics=[Metric(agg=Aggregate.AVG, column=Column.SALARY)],
+            group_by=[Column.DEPARTMENT],
+        )
+    )
+    assert "GROUP BY department" in compiled.sql
+    assert "DISTINCT" not in compiled.sql.upper()
+    assert f"COUNT(*) >= {MIN_COHORT_SIZE}" in compiled.sql
+
+
+def test_distinct_is_not_applied_to_a_plain_select() -> None:
+    compiled = compile_spec(QuerySpec(select=[Column.NAME]))
+    assert compiled.sql.startswith("SELECT name FROM employees")
+
+
+def test_distinct_returns_real_unique_departments() -> None:
+    """End to end: the answer should be the department list, not a count."""
+    from secure_rls.security.gateway import QueryGateway
+    from secure_rls.security.principal import authenticate
+
+    gw = QueryGateway(authenticate("acme_admin", "acme123"))
+    try:
+        result = gw.run_spec(QuerySpec(select=[Column.DEPARTMENT], distinct=True))
+        names = {r["department"] for r in result.rows}
+        assert "Legal" in names  # acme-only department
+        assert len(result.rows) == len(names), "duplicates leaked through DISTINCT"
+        assert 5 <= len(names) <= 10
+    finally:
+        gw.close()
+
+
 def test_spec_rejects_unknown_field() -> None:
     with pytest.raises(Exception):
         QuerySpec(select=[Column.NAME], tenant_id="beta")  # type: ignore[call-arg]
