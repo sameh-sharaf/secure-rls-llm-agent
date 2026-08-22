@@ -18,8 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from agent import (  # noqa: E402
+    MAX_TOOL_ROUNDS,
     RESET,
     SecureAgent,
+    _carried_answer,
     _fallback_from_tools,
     _humanise_refusal,
     _looks_cross_tenant,
@@ -533,3 +535,79 @@ def test_tool_call_tags_are_stripped() -> None:
     from agent import _strip_tool_syntax
 
     assert "tool_call" not in _strip_tool_syntax("Here: <tool_call>query(x)</tool_call>")
+
+
+# --------------------------------------------------------------------------
+# the research loop
+# --------------------------------------------------------------------------
+
+def test_the_model_gets_another_round_after_results_come_back() -> None:
+    """One round means committing to every query before seeing a single row.
+
+    That is fine for "how many people are in Sales" and wrong for anything
+    shaped like research: asked to summarise performance by department the
+    model fetched one average per department and stopped, never getting to look
+    at the numbers and ask what was behind them.
+    """
+    assert SecureAgent._after_guard({"rounds": 1}) == "plan"
+    assert SecureAgent._after_guard({"rounds": MAX_TOOL_ROUNDS - 1}) == "plan"
+
+
+def test_the_loop_is_bounded() -> None:
+    assert SecureAgent._after_guard({"rounds": MAX_TOOL_ROUNDS}) == "synthesise"
+    assert SecureAgent._after_guard({"rounds": MAX_TOOL_ROUNDS + 3}) == "synthesise"
+
+
+def test_a_leak_outranks_another_round() -> None:
+    """A blocked turn must end, not loop back and try again."""
+    assert SecureAgent._after_guard({"rounds": 0, "refusal_reason": "leak"}) == "refuse"
+
+
+def test_a_policy_refusal_still_routes_to_retry() -> None:
+    """`retry` carries the reason back to the planner; the plain loop does not."""
+    state = {
+        "rounds": 1,
+        "attempts": 0,
+        "trace": [{"kind": "tool", "status": "refused"}],
+    }
+    assert SecureAgent._after_guard(state) == "retry"
+
+
+def test_every_path_out_of_guard_is_declared(agent: SecureAgent) -> None:
+    """A branch the graph has no edge for is a runtime error, not a test failure."""
+    graph = agent.graph.get_graph()
+    targets = {e.target for e in graph.edges if e.source == "guard"}
+    assert {"plan", "retry", "synthesise", "refuse"} <= targets
+
+
+def test_tools_still_reach_guard_before_the_model_sees_anything(agent: SecureAgent) -> None:
+    """The loop must not become a path around layer 5.
+
+    `guard -> plan` is new; `tools -> guard` staying the only edge out of
+    `tools` is what keeps it honest.
+    """
+    graph = agent.graph.get_graph()
+    assert {e.target for e in graph.edges if e.source == "tools"} == {"guard"}
+
+
+def test_rounds_reset_between_turns(agent: SecureAgent) -> None:
+    """Otherwise the second question in a session gets no research budget."""
+    fresh = agent._route({"question": "how many employees are there?", "messages": []})
+    assert fresh["rounds"] == 0
+
+
+def test_the_planner_s_own_answer_is_carried_rather_than_rewritten() -> None:
+    """Saves a model call per turn, and cannot drift from the rows it read."""
+    assert _carried_answer({"messages": [AIMessage(content="Engineering averages 3.32.")]}) == (
+        "Engineering averages 3.32."
+    )
+
+
+def test_an_answer_is_not_carried_while_tool_calls_are_pending() -> None:
+    pending = AIMessage(content="", tool_calls=[{"name": "query_employees", "args": {}, "id": "1"}])
+    assert _carried_answer({"messages": [pending]}) == ""
+
+
+def test_nothing_is_carried_from_an_empty_message() -> None:
+    assert _carried_answer({"messages": [AIMessage(content="")]}) == ""
+    assert _carried_answer({"messages": []}) == ""

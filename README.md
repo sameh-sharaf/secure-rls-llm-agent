@@ -102,13 +102,24 @@ security controls and a control belongs in the topology rather than in a prompt:
 
 ```
 route ─┬─> refuse (terminal, never touches a data tool)
-       └─> plan ──> tools ──> guard ─┬─> synthesise ──> answer
-                      ▲              ├─> retry ──┘ (max 2)
-                      └──────────────┘              └─> refuse
+       └─> plan ──> tools ──> guard ─┬─> plan  (research loop, max 3 rounds)
+             ▲                       ├─> retry (max 2, on a policy refusal)
+             └───────────────────────┼─> synthesise ──> answer
+                                     └─> refuse
 ```
 
+`guard → plan` is the research loop. With a single round the model has to
+commit to every query it will make before seeing a row, which is fine for "how
+many people are in Sales" and wrong for anything shaped like research — asked
+to summarise performance by department it fetched one average per department
+and stopped. Now it fetches, looks, and asks again: averages, then headcounts,
+then the answer. Each extra round costs one model call, paid only when the
+model actually asks for more.
+
 `guard` is the **only** outgoing edge from `tools` — asserted by a test that
-inspects the compiled graph, not by a comment. Conversation memory is
+inspects the compiled graph, not by a comment. The loop adds an edge *out* of
+`guard`, never one around it: every result passes layer 5 before the model sees
+it, on every round. Conversation memory is
 checkpointed per `(thread, tenant)`: history is tenant data too.
 
 ---

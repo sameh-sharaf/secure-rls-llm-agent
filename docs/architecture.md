@@ -25,9 +25,11 @@ for the part that does the defending.
 │ SecureAgent (LangGraph)                                          │
 │                                                                  │
 │   route ─┬─> refuse (terminal, holds no tool)                    │
-│          └─> plan ─> tools ─> guard ─┬─> synthesise ─> answer    │
-│                        ▲             ├─> retry ─┘  (max 2)       │
-│                        └─────────────┘            └─> refuse     │
+│          └─> plan ─> tools ─> guard ─┬─> plan  (research loop,   │
+│                ▲                     │         max 3 rounds)     │
+│                │                     ├─> retry ─┘  (max 2)       │
+│                └─────────────────────┼─> synthesise ─> answer    │
+│                                      └─> refuse                  │
 └─────────────────────────────────────────────────────────────────┘
                           │
                           ▼  every tool call

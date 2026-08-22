@@ -47,6 +47,20 @@ from secure_rls.session import Session
 DEFAULT_MODEL = os.environ.get("SECURE_RLS_MODEL", "gemma4:26b-a4b-it-q4_K_M")
 MAX_ATTEMPTS = 2
 
+#: How many times the model may look at results and ask for more data.
+#:
+#: With one round the model has to commit to every query it will ever make
+#: before seeing a single row, which is fine for "how many people are in Sales"
+#: and wrong for anything that reads like research. Asked to "research
+#: performance and summarise by department" it fetched one average per
+#: department and stopped -- it never got to look at 3.51 against 3.32 and
+#: decide it wanted spread, headcount, or the people behind those means.
+#:
+#: Each extra round is one more model call. That is the entire cost, it is paid
+#: only when the model actually asks for more data, and for questions of this
+#: shape it buys a real answer instead of a plausible one.
+MAX_TOOL_ROUNDS = 3
+
 #: Hard ceiling on generated tokens.
 #:
 #: Not only a latency control. Small local models degenerate into repetition
@@ -138,6 +152,9 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     question: str
     attempts: int
+    #: Completed tool rounds this turn. Reset in `route`, like everything else
+    #: that must not survive into the next question.
+    rounds: int
     rejections: Annotated[list[str], merge_reasons]
     trace: Annotated[list[dict], merge_steps]
     #: Index into `messages` where the current turn begins.
@@ -370,6 +387,7 @@ class SecureAgent:
             # node that runs on every turn, which makes it the right place to
             # reset per-turn state.
             "refusal_reason": "",
+            "rounds": 0,
             "turn_start": turn_start,
             "rejections": ["__reset__"],
             "trace": fresh + [step("route", "In scope", status="ok")],
@@ -468,7 +486,12 @@ class SecureAgent:
                 ToolMessage(content=str(content), tool_call_id=call.get("id", name))
             )
 
-        return {"messages": outputs, "trace": trace, "rejections": rejections}
+        return {
+            "messages": outputs,
+            "trace": trace,
+            "rejections": rejections,
+            "rounds": state.get("rounds", 0) + 1,
+        }
 
     def _guard(self, state: AgentState) -> dict:
         """Layer 5, on the graph. Every tool result passes through here."""
@@ -531,13 +554,25 @@ class SecureAgent:
                 ],
             }
 
-        prompt_text = system_prompt(self.session, include_policy=self.include_policy)
-        messages: list[AnyMessage] = [SystemMessage(content=prompt_text)]
-        messages += state.get("messages", [])
-        response = self.llm.invoke(messages)
-        text = _strip_tool_syntax(_content_of(response))
         this_turn_messages = state.get("messages", [])[state.get("turn_start", 0):]
         ran_any_tool = any(isinstance(m, ToolMessage) for m in this_turn_messages)
+
+        # The research loop ends with a `plan` call that looked at the tool
+        # results and answered in prose instead of asking for more. That text is
+        # already grounded in the data it just read, so re-asking a second model
+        # to write it again costs a round trip and can only drift further from
+        # the rows. Reuse it, and keep every check below.
+        #
+        # Only when a tool actually ran: on the no-tool path the planner answers
+        # from the prompt alone with tools bound, and that output is what
+        # `_synthesise` has always been here to replace.
+        text = _carried_answer(state) if ran_any_tool else ""
+        if not text:
+            prompt_text = system_prompt(self.session, include_policy=self.include_policy)
+            messages: list[AnyMessage] = [SystemMessage(content=prompt_text)]
+            messages += state.get("messages", [])
+            response = self.llm.invoke(messages)
+            text = _strip_tool_syntax(_content_of(response))
 
         if not text:
             # Reasoning-capable models sometimes return an empty `content` with
@@ -658,6 +693,14 @@ class SecureAgent:
 
     @staticmethod
     def _after_guard(state: AgentState) -> str:
+        """Where a turn goes once its tool results have cleared layer 5.
+
+        Order matters. A leak outranks everything. A policy refusal is handled
+        by `retry`, which carries the reason back to the planner. Otherwise the
+        model gets to look at what it fetched and decide whether that was
+        enough -- the only way to find out is to ask it, which is what the
+        round budget is spent on.
+        """
         if state.get("refusal_reason"):
             return "refuse"
         trace = state.get("trace", [])
@@ -665,6 +708,8 @@ class SecureAgent:
         attempts = state.get("attempts", 0)
         if refused and attempts < MAX_ATTEMPTS:
             return "retry"
+        if state.get("rounds", 0) < MAX_TOOL_ROUNDS:
+            return "plan"
         return "synthesise"
 
     def _retry(self, state: AgentState) -> dict:
@@ -693,10 +738,19 @@ class SecureAgent:
         )
         # The only edge out of `tools` goes to `guard`. Nothing routes around it.
         graph.add_edge("tools", "guard")
+        # `guard -> plan` is the research loop: the model sees the tool results
+        # and either asks for more or writes the answer. Note what it is not --
+        # a path around the guard. Every result still passes layer 5 before the
+        # model ever sees it, on every round.
         graph.add_conditional_edges(
             "guard",
             self._after_guard,
-            {"retry": "retry", "synthesise": "synthesise", "refuse": "refuse"},
+            {
+                "plan": "plan",
+                "retry": "retry",
+                "synthesise": "synthesise",
+                "refuse": "refuse",
+            },
         )
         graph.add_edge("retry", "plan")
         graph.add_edge("synthesise", END)
@@ -987,6 +1041,23 @@ def _unsupported_figures(text: str, sources: list[str]) -> list[float]:
         if not any(abs(value - s) <= max(abs(s) * 0.01, 0.5) for s in supported):
             offenders.append(value)
     return offenders
+
+
+def _carried_answer(state: AgentState) -> str:
+    """The planner's own answer, when it already wrote one after seeing data.
+
+    The last message of a completed research loop is an `AIMessage` with prose
+    and no tool calls -- the model deciding it has enough. Anything else (a
+    message still carrying tool calls, an empty content, a `ToolMessage`) means
+    there is no answer to carry and the caller must ask for one.
+    """
+    messages = state.get("messages", [])
+    if not messages:
+        return ""
+    last = messages[-1]
+    if not isinstance(last, AIMessage) or getattr(last, "tool_calls", None):
+        return ""
+    return _strip_tool_syntax(_content_of(last))
 
 
 def _fallback_from_tools(state: AgentState) -> str:
