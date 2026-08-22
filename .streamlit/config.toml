@@ -25,6 +25,15 @@ secondaryBackgroundColor = "#161A21"
 textColor = "#E4E7EC"
 
 [server]
-# The demo runs locally against a local model; nothing here should be reaching
-# out, and file watching restarts the app under the user mid-question.
-fileWatcherType = "none"
+# Watching is on, and turning it off was a mistake worth recording.
+#
+# It was set to "none" so the app could not restart under someone mid-question.
+# But Streamlit re-reads app.py on every rerun regardless of the watcher, while
+# imported modules stay cached in sys.modules -- so after an edit the script was
+# new and `secure_rls.*` was old. That half-stale state produced
+# `'Turn' object has no attribute 'model'` from code that was correct on disk,
+# which is a far more confusing failure than a restart.
+#
+# Set this to "none" before a live demo if a mid-question restart would be
+# worse; while the code is being changed, consistency wins.
+fileWatcherType = "auto"
