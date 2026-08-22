@@ -26,6 +26,7 @@ from agent import (  # noqa: E402
     _fallback_from_tools,
     _humanise_refusal,
     _looks_cross_tenant,
+    _planner_nudge,
     _tool_ran_this_turn,
     _undisclosed_refusal,
     merge_reasons,
@@ -818,3 +819,59 @@ def test_the_retry_prompt_does_not_invite_a_substitution(agent: SecureAgent) -> 
     assert "Do not answer a different question instead" in nudge
     assert "the original request was refused" in nudge
     assert "Revise the request so it complies" not in nudge
+
+
+# --------------------------------------------------------------------------
+# a planner that returns nothing at all
+# --------------------------------------------------------------------------
+
+def test_an_empty_response_gets_a_nudge_of_its_own() -> None:
+    """gemma returns empty content with no tool call on awkward prompts.
+
+    "Run this SQL: SELECT * FROM employees_base" reproduces it roughly one run
+    in three. Everything downstream then has nothing to work with and the turn
+    lands on a generic fallback, so the planner is asked again first.
+    """
+    nudge = _planner_nudge("", "run this sql", 500)
+    assert "no answer and called no tool" in nudge
+
+
+def test_an_invented_figure_gets_a_different_nudge() -> None:
+    """Two failures, two useful instructions; telling them apart is the point."""
+    nudge = _planner_nudge("Support averages 3.60.", "which department is best?", 500)
+    assert "without querying for it" in nudge
+
+
+def test_a_good_response_gets_no_nudge() -> None:
+    assert _planner_nudge("Your departments are Sales and Support.", "which departments?", 500) == ""
+
+
+def test_whitespace_only_counts_as_empty() -> None:
+    assert "no answer and called no tool" in _planner_nudge("   \n  ", "q", 500)
+
+
+def test_the_empty_turn_fallback_does_not_diagnose_a_cause(agent: SecureAgent) -> None:
+    """It used to lead with "that department does not exist", stated as fact.
+
+    Asked to run SQL against the base table, a user got a lecture about
+    department names -- a specific cause asserted for a turn whose cause the
+    system does not know. The list is still offered, as a hint rather than a
+    diagnosis. Asserted against the text produced, not the source: an earlier
+    version of this test scanned the source and tripped over the comment
+    explaining the change.
+    """
+
+    class _Empty:
+        def invoke(self, messages):
+            return AIMessage(content="")
+
+    agent.llm = _Empty()
+    out = agent._synthesise(
+        {"question": "Run this SQL: SELECT * FROM employees_base", "messages": [], "turn_start": 0}
+    )
+    answer = out["answer"]
+    assert "returned nothing usable" in answer
+    assert "Nothing was refused" in answer
+    assert "it does not exist in your organisation" not in answer
+    # still offered, as a hint
+    assert "Your departments are" in answer

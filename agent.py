@@ -429,19 +429,13 @@ class SecureAgent:
         # backed by earlier results -- never reach it.
         reasked = False
         if not calls and not _tool_ran_this_turn(state):
-            text = _strip_tool_syntax(_content_of(response))
-            if _answered_a_data_question_without_data(
-                text, state.get("question", ""), self.session.gateway.total_rows()
-            ):
-                messages.append(
-                    HumanMessage(
-                        content=(
-                            "You gave a figure without querying for it. Do not answer from "
-                            "memory or from the sample rows in your instructions. Call a tool "
-                            "to fetch the data, then answer from what it returns."
-                        )
-                    )
-                )
+            nudge = _planner_nudge(
+                _strip_tool_syntax(_content_of(response)),
+                state.get("question", ""),
+                self.session.gateway.total_rows(),
+            )
+            if nudge:
+                messages.append(HumanMessage(content=nudge))
                 response = self.llm_with_tools.invoke(messages)
                 calls = getattr(response, "tool_calls", None) or []
                 reasked = True
@@ -627,16 +621,25 @@ class SecureAgent:
                 "I ran the query but could not phrase a summary. The result is shown below."
                 if ran_a_tool
                 else (
-                    # Name the departments. The commonest cause of an unanswered
-                    # question here is one naming something that does not exist
-                    # -- "the highest salary in HR", where there is no HR -- and
-                    # the system already knows the real list. Saying "try
-                    # rephrasing" while holding the answer is unhelpful.
-                    "I could not answer that. Your departments are "
-                    f"{', '.join(self.session.gateway.departments())} -- if you asked "
-                    "about one not in that list, it does not exist in your organisation. "
-                    "Otherwise try, for example, average salary by department or "
-                    "headcount in Sales."
+                    # No tool ran and the model produced nothing, twice. Say
+                    # that, rather than diagnosing it.
+                    #
+                    # This message used to lead with "if you asked about a
+                    # department not in this list, it does not exist" -- a
+                    # specific cause, stated as fact, for a turn whose actual
+                    # cause is unknown. Asked to run SQL against the base
+                    # table, a user got a lecture about department names. The
+                    # department list is still worth offering, as a hint rather
+                    # than a diagnosis: naming something that does not exist is
+                    # a common cause, and the system does know the real list.
+                    "I could not produce an answer to that -- the model returned "
+                    "nothing usable, twice, and no query was run. Nothing was "
+                    "refused; the turn simply came back empty, so it is worth "
+                    "asking again.\n\n"
+                    "Your departments are "
+                    f"{', '.join(self.session.gateway.departments())}. "
+                    "Questions like \"average salary by department\" or "
+                    "\"headcount in Sales\" work well."
                 )
             )
 
@@ -1121,6 +1124,38 @@ def _unsupported_figures(text: str, sources: list[str]) -> list[float]:
 def _tool_ran_this_turn(state: AgentState) -> bool:
     messages = state.get("messages", [])[state.get("turn_start", 0):]
     return any(isinstance(m, ToolMessage) for m in messages)
+
+
+def _planner_nudge(text: str, question: str, total_rows: int) -> str:
+    """What to say to a planner that produced neither a tool call nor an answer.
+
+    Two failures, both ending in a dead turn, and worth telling apart because
+    the useful instruction differs.
+
+    *Nothing at all.* gemma returns an empty `content` with no tool call
+    perhaps one run in three on an awkward prompt -- the base-table probe is a
+    reliable way to see it. Everything downstream then has nothing to work
+    with, and the turn lands on a generic fallback.
+
+    *A figure it never queried.* The other shape: prose that states an average
+    the model did not fetch, which the grounding guard then refuses with
+    nothing to show in its place.
+
+    Returns the instruction to send, or "" when the response is fine as it is.
+    """
+    if not text.strip():
+        return (
+            "You returned no answer and called no tool, so the user would see nothing. "
+            "If the question needs data, call a tool to fetch it and answer from the "
+            "result. If it cannot be answered within policy, say so and say why."
+        )
+    if _answered_a_data_question_without_data(text, question, total_rows):
+        return (
+            "You gave a figure without querying for it. Do not answer from memory or "
+            "from the sample rows in your instructions. Call a tool to fetch the data, "
+            "then answer from what it returns."
+        )
+    return ""
 
 
 def _answered_a_data_question_without_data(text: str, question: str, total_rows: int) -> bool:
