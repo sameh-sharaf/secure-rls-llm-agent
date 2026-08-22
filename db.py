@@ -365,7 +365,7 @@ def schema_description() -> str:
     types = {
         "user_id": "INTEGER, unique employee id",
         "name": "TEXT, full name",
-        "department": "TEXT, e.g. Engineering, Sales, Marketing, Finance, Operations, Support",
+        "department": "TEXT (the actual values for your organisation are listed below)",
         "salary": "INTEGER, annual gross in EUR",
         "performance_score": "REAL 1.0-5.0, may be NULL",
         "hire_date": "TEXT, ISO date YYYY-MM-DD",

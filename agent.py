@@ -167,6 +167,10 @@ Rules:
   find one, say so in your answer.
 - If a question asks about another organisation, say plainly that you can only
   see your own, and answer the version of the question that applies to yours.
+- If it names a department that is not in the list above, say so directly --
+  "there is no HR department; yours are X, Y, Z" -- and do not query for it.
+  The list is complete, so a missing name means the department does not exist,
+  not that you failed.
 - If your role may not read an individual salary, you can still describe the
   range. For "the highest salary" use the p90 metric; for "typical" use median.
   Answer with that rather than refusing outright -- but say which statistic it
@@ -196,6 +200,12 @@ def system_prompt(session: Session, *, include_policy: bool = True) -> str:
         f"Role: {session.principal.role.value} "
         f"({'may see individual salaries' if session.principal.policy.row_level_salary else 'may see salary statistics but not an individual salary'}).\n\n"
         f"SCHEMA\n{schema_description()}\n\n"
+        # The real list, not an example. A hardcoded "e.g." list in the schema
+        # omitted Legal and left it ambiguous whether it was exhaustive, so a
+        # model asked for "the highest salary in HR" -- a department that does
+        # not exist -- declined to query at all rather than saying so.
+        f"DEPARTMENTS IN YOUR ORGANISATION (this list is complete; there are no "
+        f"others)\n  {', '.join(session.gateway.departments())}\n\n"
         f"SAMPLE ROWS (from your own organisation)\n{sample}\n"
     )
     return header + ("\n" + POLICY_PROMPT if include_policy else "")
@@ -521,7 +531,7 @@ class SecureAgent:
         messages: list[AnyMessage] = [SystemMessage(content=prompt_text)]
         messages += state.get("messages", [])
         response = self.llm.invoke(messages)
-        text = _content_of(response)
+        text = _strip_tool_syntax(_content_of(response))
         this_turn_messages = state.get("messages", [])[state.get("turn_start", 0):]
         ran_any_tool = any(isinstance(m, ToolMessage) for m in this_turn_messages)
 
@@ -545,9 +555,16 @@ class SecureAgent:
                 "I ran the query but could not phrase a summary. The result is shown below."
                 if ran_a_tool
                 else (
-                    "I could not answer that. Try rephrasing it as a question about your "
-                    "organisation's workforce data -- for example, average salary by "
-                    "department, headcount, or what the notes say about retention."
+                    # Name the departments. The commonest cause of an unanswered
+                    # question here is one naming something that does not exist
+                    # -- "the highest salary in HR", where there is no HR -- and
+                    # the system already knows the real list. Saying "try
+                    # rephrasing" while holding the answer is unhelpful.
+                    "I could not answer that. Your departments are "
+                    f"{', '.join(self.session.gateway.departments())} -- if you asked "
+                    "about one not in that list, it does not exist in your organisation. "
+                    "Otherwise try, for example, average salary by department or "
+                    "headcount in Sales."
                 )
             )
 
@@ -761,6 +778,27 @@ class AgentAnswer:
     @property
     def tools_used(self) -> list[str]:
         return [s["label"] for s in self.trace if s.get("kind") == "tool"]
+
+
+#: Tool-call syntax a model sometimes emits into its prose instead of calling.
+_TOOL_SYNTAX = re.compile(
+    r'(\{\s*"name"\s*:|"parameters"\s*:|<tool_call>|```(?:json|sql|python)?\s*\w+\s*\()',
+    re.I,
+)
+
+
+def _strip_tool_syntax(text: str) -> str:
+    """Cut an answer at the point it starts emitting machinery.
+
+    Models sometimes narrate the call they intended to make -- llama3.1 answered
+    "There is no HR department; yours are ..." and then appended a raw
+    {"name": "run_sql", "parameters": ...} blob. The useful sentence is the part
+    before that, and showing the rest makes a working system look broken.
+    """
+    match = _TOOL_SYNTAX.search(text or "")
+    if not match:
+        return text
+    return (text[: match.start()]).rstrip().rstrip(":").rstrip()
 
 
 def _content_of(response: Any) -> str:

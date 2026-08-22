@@ -299,6 +299,23 @@ class QueryGateway:
     #: Shown in place of a value the caller's role may not read.
     MASKED_PLACEHOLDER = "<restricted for your role>"
 
+    def departments(self) -> list[str]:
+        """This tenant's actual departments.
+
+        Goes into the system prompt so the model can answer "the highest salary
+        in HR" correctly -- there is no HR department, and the right reply names
+        the ones that exist rather than giving up. The schema previously carried
+        a hardcoded "e.g." list that omitted Legal and left it ambiguous whether
+        the list was exhaustive, so a model asked about a department not on it
+        declined to query at all.
+
+        Safe to include: a dimension, not a measure, tenant-scoped by the same
+        bound connection as everything else, and reachable by either role
+        through an ordinary DISTINCT.
+        """
+        rows = self._db.execute("SELECT DISTINCT department FROM employees ORDER BY department")
+        return [r["department"] for r in rows]
+
     def sample_rows(self, n: int = 3) -> list[dict]:
         """A few of the tenant's own rows, with the role's column policy applied.
 

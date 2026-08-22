@@ -506,3 +506,30 @@ def test_rounding_is_allowed() -> None:
     from agent import _unsupported_figures
 
     assert _unsupported_figures("the average is 145,257", ["avg_salary 145256.58"]) == []
+
+
+# ------------------------------------------------ answers must not leak machinery ---
+
+
+def test_tool_call_syntax_is_stripped_from_an_answer() -> None:
+    """llama3.1 answered correctly and then appended the call it meant to make."""
+    from agent import _strip_tool_syntax
+
+    text = 'There is no HR department; yours are Engineering, Finance. {"name": "run_sql"}'
+    out = _strip_tool_syntax(text)
+    assert out.startswith("There is no HR department")
+    assert "run_sql" not in out and "{" not in out
+
+
+def test_a_clean_answer_is_untouched() -> None:
+    from agent import _strip_tool_syntax
+
+    assert _strip_tool_syntax("There are 62 people in Marketing.") == (
+        "There are 62 people in Marketing."
+    )
+
+
+def test_tool_call_tags_are_stripped() -> None:
+    from agent import _strip_tool_syntax
+
+    assert "tool_call" not in _strip_tool_syntax("Here: <tool_call>query(x)</tool_call>")
