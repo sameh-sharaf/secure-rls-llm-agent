@@ -10,7 +10,7 @@
       "config": "L3 query gateway disabled",
       "stopped_by": "L4 database boundary",
       "leaked": false,
-      "detail": "query rejected by the database: access to employees_base.user_id is pr"
+      "detail": "query rejected by the database: no such table: employees_base"
     },
     {
       "config": "L4 boundary replaced by an app-code WHERE",

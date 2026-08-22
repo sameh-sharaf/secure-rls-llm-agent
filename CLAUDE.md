@@ -27,9 +27,13 @@ project exists to demonstrate.
    `db.py` and `secure_rls/security/` may open a database connection. If you
    need data in a new tool, take a gateway.
 
-4. **The authorizer denies `employees_base` unconditionally.** There is no
-   `source` value, view name, or CTE name that grants an exception. See
-   ADR-0002 for the bypass that made this rule absolute.
+4. **The agent's connection holds the tenant's slice and nothing else.**
+   `main` is a private in-memory database; the data file is attached read-only
+   only long enough to copy the rows out, then detached. The base table is
+   therefore *absent*, not merely denied. The authorizer stays and still denies
+   `employees_base` unconditionally -- no `source` value, view name or CTE name
+   grants an exception (ADR-0002) -- but it is now defence in depth rather than
+   the whole boundary, because it cannot be relied on alone (ADR-0006).
 
 5. **The output guard raises; it never filters.** Silently removing an
    offending row would hide the bug that produced it.
@@ -128,6 +132,13 @@ python -m evals.ablation
   did exactly this and reported a confident 0.00% for every arm, including the
   one built to leak. `tests/test_ablation_harness.py` exists so the harness
   cannot silently measure nothing again — run it before trusting an eval.
+- **SQLite does not consult the authorizer for every read.** A join key named
+  through `USING` or `NATURAL JOIN` is read with no `SQLITE_READ` callback at
+  all; the same join written with `ON` is checked and denied. This was found by
+  adding a second table and logging every authorizer invocation. Do not treat
+  the callback as a complete account of what a statement touches, and do not
+  fix a gap like this by banning syntax -- ADR-0006 removes the relation
+  instead, so the parser refuses before authorization is a question.
 - **Row order hides leaks.** `user_id` is sequential by tenant, so acme owns
   1-500. An unbounded read of the base table by an *acme* session returns acme's
   own rows first and looks legitimate. Attacks meant to demonstrate a leak

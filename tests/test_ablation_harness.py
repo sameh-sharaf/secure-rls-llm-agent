@@ -56,9 +56,17 @@ def test_full_stack_blocks_at_layer_3() -> None:
         _run_attack()
 
 
+# The base table is denied twice over, and which denial fires first changed
+# when the source database stopped being `main` (ADR-0006): the parser now
+# reports "no such table" before the authorizer is ever consulted. Both are L4
+# refusing, so the test asserts the refusal rather than the wording -- pinning
+# one message would have made a strengthened boundary look like a regression.
+_L4_DENIED = "no such table|prohibited|not authorized"
+
+
 def test_layer_4_alone_holds() -> None:
     """The claim that matters: with the query gateway gone, the engine refuses."""
-    with pytest.raises(SecurityError, match="prohibited"):
+    with pytest.raises(SecurityError, match=_L4_DENIED):
         _run_attack("l3")
 
 
@@ -96,7 +104,7 @@ def test_restore_puts_every_layer_back() -> None:
         _run_attack("l3", "l4")
     with pytest.raises(SqlRejected):
         _run_attack()          # L3 must be back
-    with pytest.raises(SecurityError, match="prohibited"):
+    with pytest.raises(SecurityError, match=_L4_DENIED):
         _run_attack("l3")      # L4 must be back
     with pytest.raises(LeakDetected, match="does not belong"):
         _run_attack("l3", "l4")  # L5 must be back

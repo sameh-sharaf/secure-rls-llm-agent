@@ -235,20 +235,31 @@ _ALLOWED_ACTIONS = frozenset(
 )
 
 
-def _assert_no_shadow_relation(conn: sqlite3.Connection) -> None:
-    """The authorizer permits reads of `employees` without checking the schema
-    name in one case (see below), which is only safe while the main database
-    holds no relation of that name. Verify it instead of trusting it.
+def _assert_nothing_reachable_but_the_agent_table(conn: sqlite3.Connection) -> None:
+    """The connection must hold the tenant's slice and nothing else.
+
+    Two properties, checked rather than assumed:
+
+    * `main` is empty, so there is no relation for a query to name -- in
+      particular none called `employees`, which would shadow the temp table in
+      the one authorizer branch that accepts a null schema name (`COUNT(*)`);
+    * `temp` holds exactly the agent table.
+
+    Verified after the source is detached, because that is the moment the
+    claim has to be true.
     """
-    row = conn.execute(
-        "SELECT COUNT(*) FROM main.sqlite_master WHERE name = ? AND type IN ('table','view')",
-        (AGENT_TABLE,),
-    ).fetchone()
-    if row[0]:
-        raise SecurityError(
-            f"main database contains a relation named {AGENT_TABLE!r}, which would "
-            f"shadow the tenant-scoped temp table"
-        )
+    for schema, expected in (("main", set()), ("temp", {AGENT_TABLE})):
+        found = {
+            r[0]
+            for r in conn.execute(
+                f"SELECT name FROM {schema}.sqlite_master WHERE type IN ('table','view')"
+            )
+            if not r[0].startswith("sqlite_")
+        }
+        if found != expected:
+            raise SecurityError(
+                f"{schema} schema holds {sorted(found)}, expected {sorted(expected)}"
+            )
 
 
 def _make_authorizer(tenant: str):
@@ -285,12 +296,25 @@ def tenant_connection(
 
     Ordering matters and is not incidental:
       1. validate the tenant against the allowlist (fail closed),
-      2. open read-only,
-      3. materialise the tenant's rows into a private temp table,
-      4. *then* install the authorizer and shut the door.
+      2. open a private, empty in-memory database,
+      3. attach the real file read-only and copy the tenant's rows out of it,
+      4. detach it, so no relation but the agent's own remains reachable,
+      5. *then* install the authorizer and shut the door.
 
     Installing the authorizer earlier would block step 3; installing it later
     would leave a window in which the base table is readable.
+
+    Step 4 is why `main` is a scratch database rather than the data file. The
+    authorizer alone is not quite enough: SQLite does not consult it for a join
+    key named through `USING` or `NATURAL JOIN`, so with the file open as
+    `main`, `employees JOIN other_table USING (user_id)` reads `other_table`
+    without ever asking. `ON` asks; `USING` does not. Rather than enumerate
+    which syntax the callback covers, detaching leaves nothing to name -- the
+    reply becomes "no such table" from the parser, before authorization is even
+    a question. See ADR-0006.
+
+    The cost is a per-session copy of the tenant's rows in memory, which is
+    right for this dataset and would need revisiting for a large one.
     """
     tenant = _require_known_tenant(tenant)
 
@@ -305,20 +329,26 @@ def tenant_connection(
     # base table. What it does remove is sqlite3's protection against
     # *concurrent* use, so `TenantDatabase` serialises every statement behind a
     # lock. Trading a crash for a silent data race would be a poor deal.
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    conn = sqlite3.connect(":memory:", uri=True, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    _assert_no_shadow_relation(conn)
 
     columns = ", ".join(AGENT_COLUMNS)
-    # `tenant` is bound as a parameter, never interpolated -- even though it has
-    # already been checked against a frozenset of three literals. Defence in
-    # depth means not relying on the check one line above.
-    conn.execute(
-        f"CREATE TEMP TABLE {AGENT_TABLE} AS "
-        f"SELECT {columns} FROM {BASE_TABLE} WHERE tenant_id = ?",
-        (tenant,),
-    )
+    source = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    conn.execute("ATTACH DATABASE ? AS src", (source,))
+    try:
+        # `tenant` is bound as a parameter, never interpolated -- even though it
+        # has already been checked against a frozenset of three literals.
+        # Defence in depth means not relying on the check one line above.
+        conn.execute(
+            f"CREATE TEMP TABLE {AGENT_TABLE} AS "
+            f"SELECT {columns} FROM src.{BASE_TABLE} WHERE tenant_id = ?",
+            (tenant,),
+        )
+    finally:
+        conn.execute("DETACH DATABASE src")
+
     conn.execute(f"CREATE INDEX temp.idx_dept ON {AGENT_TABLE}(department)")
+    _assert_nothing_reachable_but_the_agent_table(conn)
 
     conn.set_authorizer(_make_authorizer(tenant))
     _install_timeout(conn, clock if clock is not None else {})

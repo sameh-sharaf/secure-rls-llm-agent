@@ -42,9 +42,10 @@ for the part that does the defending.
 ┌─────────────────────────────────────────────────────────────────┐
 │ L4  the boundary  ── db.tenant_connection(tenant)                │
 │     1. validate tenant against a 3-element allowlist             │
-│     2. open read-only                                            │
-│     3. CREATE TEMP TABLE employees AS                            │
-│          SELECT <7 cols> FROM employees_base WHERE tenant_id = ? │
+│     2. open a private, empty in-memory database                  │
+│     3. ATTACH the data file read-only; CREATE TEMP TABLE         │
+│          employees AS SELECT <cols> FROM src.employees_base      │
+│          WHERE tenant_id = ?;  then DETACH it                    │
 │     4. set_authorizer: DENY employees_base unconditionally,      │
 │        DENY sqlite_master / ATTACH / PRAGMA / all writes         │
 │                                                                  │
@@ -65,10 +66,14 @@ for the part that does the defending.
 ## Why the ordering in L4 is not incidental
 
 1. Validate first, so a tenant value never reaches SQL unchecked.
-2. Open read-only, so writes fail at the file level as well as the authorizer.
+2. Attach read-only, so writes fail at the file level as well as the authorizer.
 3. Materialise *before* installing the authorizer — the authorizer denies
    `employees_base`, so it would block its own setup.
-4. Install the authorizer *before* returning the connection — any gap is a
+4. Detach the source, so the only relation the connection can name is the
+   tenant's own. This is what makes L4 independent of *which* reads SQLite
+   chooses to route through the authorizer — see ADR-0006, where a `USING`
+   join turned out to bypass the callback entirely.
+5. Install the authorizer *before* returning the connection — any gap is a
    window in which the base table is readable.
 
 ## Data-flow invariants

@@ -43,7 +43,7 @@ Five layers. One of them is the boundary; the rest are defence in depth.
 | **L1** | Identity binding (`security/principal.py`) | `Principal` built at login from the server-side session. Never a tool argument, never in a prompt as something rewritable, never round-tripped through the browser. | n/a — supplies the identity |
 | **L2** | Tool contract (`tools/factory.py`) | Tools are closures over a gateway built from the principal. **No tool takes a tenant parameter.** Pydantic schemas set `extra="forbid"`. | n/a — removes the vocabulary |
 | **L3** | Query gateway (`security/spec.py`, `sql_guard.py`) | Typed specs compile to parameterised SQL. Model-written SQL is validated on the sqlglot AST and rewritten for row limits. A k-anonymity floor is implemented and off by default (see Known limitations). | **Yes** — while its allowlist is complete |
-| **L4** | **Database enforcement (`db.py`)** | **A per-connection temp table holding only this tenant's rows, plus an authorizer denying `employees_base` unconditionally.** | **Yes — and it anticipates nothing** |
+| **L4** | **Database enforcement (`db.py`)** | **A private per-session database holding only this tenant's rows — the source file is detached, so nothing else exists to name — plus an authorizer denying `employees_base` unconditionally.** | **Yes — and it anticipates nothing** |
 | **L5** | Output guard + audit (`security/output_guard.py`, `audit.py`) | Verifies every result against a *privileged* id set, scans for foreign canaries, raises rather than filters, hash-chains the audit log. | **Yes** — detects rather than prevents |
 
 L1 and L2 are not in the "alone" column because they are not last-line
@@ -75,16 +75,25 @@ convincing than any paragraph of documentation.
 SQLite has no `GRANT`, no roles and no policies. Two engine-level primitives
 combine into an equivalent:
 
-1. A per-connection `TEMP TABLE employees` materialised with only this tenant's
-   rows, before any agent code touches the connection.
+1. A private in-memory database per session. The data file is attached
+   read-only just long enough to copy the tenant's rows into a `TEMP TABLE`,
+   then detached — so the base table is not *denied*, it is **absent**. A query
+   naming it gets `no such table` from the parser.
 2. An authorizer callback (`Connection.set_authorizer`) that SQLite consults
    during statement preparation for every table and column — including inside
    subqueries, CTEs and set operations. It denies `employees_base`
    unconditionally, plus `sqlite_master`, `ATTACH`, `PRAGMA` and every write.
 
-Ordering is part of the control: validate tenant → open read-only → materialise
-→ install authorizer. See **ADR-0002** for the CTE-impersonation bypass that
-ruled out the more obvious temp-*view* design.
+Ordering is part of the control: validate tenant → attach read-only →
+materialise → detach → install authorizer.
+
+Both, rather than either. **ADR-0002** records the CTE-impersonation bypass that
+ruled out the more obvious temp-*view* design. **ADR-0006** records why the
+authorizer cannot be the whole boundary: SQLite does not invoke it for a join
+key named through `USING` or `NATURAL JOIN`, so a second table in the file was
+readable through a join that the same query written with `ON` was denied. The
+fix was not to ban the syntax but to detach the file — absence needs no rule to
+be right.
 
 ### The agent
 
