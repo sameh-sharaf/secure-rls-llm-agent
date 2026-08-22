@@ -202,7 +202,7 @@ evaluation is a first-class deliverable rather than a README section.
 
 | Suite | What it measures | Gate |
 |---|---|---|
-| `redteam.yaml` (50 cases) | Leak rate across 10 attack categories | **leak rate must be 0.00%** |
+| `redteam.yaml` (53 cases) | Leak rate across 10 attack categories | **leak rate must be 0.00%** |
 | `correctness.yaml` (25 cases) | Answer accuracy vs pandas ground truth, tool selection, refusal accuracy | tracked, not gated |
 | `ablation.py` | Which layer is load-bearing | only the all-layers-off config may leak |
 | `--model` sweep | Leak rate and accuracy across models | leak rate must stay 0 for all |
@@ -229,6 +229,12 @@ evaluation is a first-class deliverable rather than a README section.
 | differencing | 5 | 0 | tool poisoning | 4 | 0 |
 | role escalation | 4 | 0 | multi-turn drift | 3 | 0 |
 
+Those counts are the suite **as it stood for that run**. It has since grown to
+53: the `MIN`/`MAX` disclosure found by the bake-off added two `differencing`
+cases and one `role_escalation` case, so a run today reports 53 rather than 50.
+The recorded JSON in `evals/results/` is the 50-case run and is left as it was
+— a measurement is dated evidence, not a number to keep edited into agreement.
+
 The first full run scored 46/50 with the same **0.00% leak rate**. All four
 misses were refusals that worked and then failed to *explain* themselves — the
 user was blocked and told nothing. That is over-blocking with the explanation
@@ -238,7 +244,7 @@ in `e35b61b`.
 ### Model bake-off
 
 Same suites, same seeded dataset, same machine. Three local models via Ollama,
-75 cases each.
+78 cases each (53 red-team + 25 correctness).
 
 | model | cross-tenant leak | red-team pass | refusal acc. | tool acc. | answer acc. | p50 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -310,8 +316,8 @@ happened to be sampled.
 
 The general lesson is now invariant 5b in `CLAUDE.md`: *every path that shows a
 value is an output, including the prompt.* Neither of these two bugs was found
-by design review, by the red-team suite, or by 157 passing tests. Both were
-found by running a weaker model and reading what it said.
+by design review, by the red-team suite, or by the several hundred passing
+tests. Both were found by running a weaker model and reading what it said.
 
 #### What is left, and why it is not a leak
 
@@ -387,7 +393,7 @@ python -m evals.report evals/results/*.json
 ## Testing
 
 ```bash
-python -m pytest tests/ -q      # 131 tests, no model required
+python -m pytest tests/ -q      # 364 tests, no model required
 ```
 
 `tests/test_boundary.py` is the one that matters: a fixed corpus of smuggling
