@@ -21,10 +21,12 @@ from agent import (  # noqa: E402
     MAX_TOOL_ROUNDS,
     RESET,
     SecureAgent,
+    _answered_a_data_question_without_data,
     _carried_answer,
     _fallback_from_tools,
     _humanise_refusal,
     _looks_cross_tenant,
+    _tool_ran_this_turn,
     merge_reasons,
     merge_steps,
     step,
@@ -611,3 +613,117 @@ def test_an_answer_is_not_carried_while_tool_calls_are_pending() -> None:
 def test_nothing_is_carried_from_an_empty_message() -> None:
     assert _carried_answer({"messages": [AIMessage(content="")]}) == ""
     assert _carried_answer({"messages": []}) == ""
+
+
+# --------------------------------------------------------------------------
+# answering a data question without querying
+# --------------------------------------------------------------------------
+
+def test_an_invented_figure_triggers_a_re_ask() -> None:
+    """gemma answered "which department is performing the best?" from the prompt.
+
+    The grounding guard caught the invented average correctly and then had
+    nothing to put in its place -- no tool had run -- so the user was told to
+    ask again for what they had just asked. The planner now asks the model
+    again instead.
+    """
+    assert _answered_a_data_question_without_data(
+        "Support is performing best, with an average score of 3.60.",
+        "which department is performing the best?",
+        300,
+    )
+
+
+def test_prose_without_a_figure_is_left_alone() -> None:
+    """Refusing to let the model speak without a citation is a different product."""
+    assert not _answered_a_data_question_without_data(
+        "Support looks strongest, but I would want to check the spread.",
+        "which department is performing the best?",
+        300,
+    )
+
+
+def test_a_figure_from_the_question_is_not_an_invention() -> None:
+    assert not _answered_a_data_question_without_data(
+        "Yes, 5 people is a small team.", "is 5 people a small team?", 300
+    )
+
+
+def test_the_row_count_is_not_an_invention() -> None:
+    """It is in the system prompt and the model may legitimately cite it."""
+    assert not _answered_a_data_question_without_data(
+        "Your organisation has 300 employees.", "how big are we?", 300
+    )
+
+
+def test_an_empty_answer_is_not_treated_as_an_invention() -> None:
+    assert not _answered_a_data_question_without_data("", "anything?", 300)
+    assert not _answered_a_data_question_without_data("   ", "anything?", 300)
+
+
+def test_the_re_ask_does_not_fire_once_a_tool_has_run(agent: SecureAgent) -> None:
+    """Later research rounds cite earlier results, which are legitimate."""
+    state = {
+        "turn_start": 0,
+        "messages": [HumanMessage(content="q"), ToolMessage(content="3.6", tool_call_id="1")],
+    }
+    assert _tool_ran_this_turn(state)
+    assert not _tool_ran_this_turn({"turn_start": 0, "messages": [HumanMessage(content="q")]})
+
+
+def test_the_re_ask_is_scoped_to_the_current_turn() -> None:
+    """A tool call from an earlier question must not license this one."""
+    state = {
+        "turn_start": 2,
+        "messages": [
+            HumanMessage(content="earlier"),
+            ToolMessage(content="3.6", tool_call_id="1"),
+            HumanMessage(content="now"),
+        ],
+    }
+    assert not _tool_ran_this_turn(state)
+
+
+def test_the_planner_re_asks_and_the_second_answer_uses_a_tool(agent: SecureAgent) -> None:
+    """The mechanism, not just the predicate.
+
+    The model is nondeterministic about this -- the same question queries
+    correctly most times and is answered from memory occasionally -- so the
+    stub makes the bad first response certain.
+    """
+    invented = AIMessage(content="Support is best, averaging 3.60.")
+    querying = AIMessage(
+        content="",
+        tool_calls=[{"name": "query_employees", "args": {"metrics": ["avg"]}, "id": "c1"}],
+    )
+    calls: list = []
+
+    class _Stub:
+        def invoke(self, messages):
+            calls.append(messages)
+            return invented if len(calls) == 1 else querying
+
+    agent.llm_with_tools = _Stub()
+    out = agent._plan(
+        {"question": "which department is performing the best?", "messages": [], "turn_start": 0}
+    )
+
+    assert len(calls) == 2, "the planner should have asked again"
+    assert out["messages"][0].tool_calls, "the re-ask should have produced a tool call"
+    assert "asked again" in out["trace"][0]["label"]
+    nudge = str(calls[1][-1].content)
+    assert "without querying" in nudge
+
+
+def test_the_planner_does_not_re_ask_a_grounded_answer(agent: SecureAgent) -> None:
+    """One extra model call is acceptable on an invention, not on every turn."""
+    calls: list = []
+
+    class _Stub:
+        def invoke(self, messages):
+            calls.append(messages)
+            return AIMessage(content="Your departments are Engineering, Sales and Support.")
+
+    agent.llm_with_tools = _Stub()
+    agent._plan({"question": "what departments are there?", "messages": [], "turn_start": 0})
+    assert len(calls) == 1

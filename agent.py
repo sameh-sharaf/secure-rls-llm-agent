@@ -414,14 +414,45 @@ class SecureAgent:
             )
 
         response = self.llm_with_tools.invoke(messages)
+        calls = getattr(response, "tool_calls", None) or []
+
+        # If it answered a data question with a figure it never queried, ask
+        # once more and say so. Cheaper than it looks: this fires only when the
+        # model has invented a number, and the alternative is the grounding
+        # guard refusing a question the user already asked, with nothing to show
+        # in place of the figure because no tool ran.
+        #
+        # Bounded to a single re-ask, and only while no tool has run this turn,
+        # so the research loop's later rounds -- where figures are legitimately
+        # backed by earlier results -- never reach it.
+        reasked = False
+        if not calls and not _tool_ran_this_turn(state):
+            text = _strip_tool_syntax(_content_of(response))
+            if _answered_a_data_question_without_data(
+                text, state.get("question", ""), self.session.gateway.total_rows()
+            ):
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "You gave a figure without querying for it. Do not answer from "
+                            "memory or from the sample rows in your instructions. Call a tool "
+                            "to fetch the data, then answer from what it returns."
+                        )
+                    )
+                )
+                response = self.llm_with_tools.invoke(messages)
+                calls = getattr(response, "tool_calls", None) or []
+                reasked = True
+
         elapsed = time.perf_counter() - started
 
-        calls = getattr(response, "tool_calls", None) or []
         label = (
             f"Chose {len(calls)} tool call(s): " + ", ".join(c["name"] for c in calls)
             if calls
             else "Answering without a tool"
         )
+        if reasked:
+            label += " (asked again: the first answer cited a figure no query supports)"
         return {
             "messages": [response],
             "trace": [step("plan", label, status="ok", seconds=elapsed)],
@@ -1041,6 +1072,30 @@ def _unsupported_figures(text: str, sources: list[str]) -> list[float]:
         if not any(abs(value - s) <= max(abs(s) * 0.01, 0.5) for s in supported):
             offenders.append(value)
     return offenders
+
+
+def _tool_ran_this_turn(state: AgentState) -> bool:
+    messages = state.get("messages", [])[state.get("turn_start", 0):]
+    return any(isinstance(m, ToolMessage) for m in messages)
+
+
+def _answered_a_data_question_without_data(text: str, question: str, total_rows: int) -> bool:
+    """The model stated a figure it cannot possibly have.
+
+    "Which department is performing the best?" is a data question, and gemma
+    sometimes answers it straight from the prompt -- naming a department and an
+    average it never queried. The grounding guard catches the invented figure
+    correctly and then has nothing to show in its place, because no tool ran, so
+    the user gets told to ask again for something they already asked.
+
+    Detected the same way the guard detects it, and deliberately narrow: only a
+    *number* the question and the row count cannot account for. Prose with no
+    figures is left alone -- "Support looks strongest" is a judgement, and
+    refusing to let the model speak without a citation is a different product.
+    """
+    if not text.strip():
+        return False
+    return bool(_unsupported_figures(text, [question, str(total_rows)]))
 
 
 def _carried_answer(state: AgentState) -> str:
