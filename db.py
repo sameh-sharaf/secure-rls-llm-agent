@@ -182,7 +182,7 @@ def build_database(csv_path: Path = CSV_PATH, db_path: Path = DB_PATH) -> int:
                 for r in _csv.DictReader(fh)
             ]
         conn.executemany(
-            f"INSERT INTO {BASE_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows
+            f"INSERT INTO {BASE_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows  # nosec B608
         )
         conn.execute(f"CREATE INDEX idx_tenant ON {BASE_TABLE}(tenant_id)")
         conn.execute(f"CREATE INDEX idx_tenant_dept ON {BASE_TABLE}(tenant_id, department)")
@@ -204,7 +204,7 @@ def tenant_user_ids(tenant: str, db_path: Path = DB_PATH) -> frozenset[int]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
-            f"SELECT user_id FROM {BASE_TABLE} WHERE tenant_id = ?", (tenant,)
+            f"SELECT user_id FROM {BASE_TABLE} WHERE tenant_id = ?", (tenant,)  # nosec B608
         ).fetchall()
         return frozenset(int(r[0]) for r in rows)
     finally:
@@ -252,7 +252,7 @@ def _assert_nothing_reachable_but_the_agent_table(conn: sqlite3.Connection) -> N
         found = {
             r[0]
             for r in conn.execute(
-                f"SELECT name FROM {schema}.sqlite_master WHERE type IN ('table','view')"
+                f"SELECT name FROM {schema}.sqlite_master WHERE type IN ('table','view')"  # nosec B608
             )
             if not r[0].startswith("sqlite_")
         }
@@ -340,7 +340,7 @@ def tenant_connection(
         # has already been checked against a frozenset of three literals.
         # Defence in depth means not relying on the check one line above.
         conn.execute(
-            f"CREATE TEMP TABLE {AGENT_TABLE} AS "
+            f"CREATE TEMP TABLE {AGENT_TABLE} AS "  # nosec B608
             f"SELECT {columns} FROM src.{BASE_TABLE} WHERE tenant_id = ?",
             (tenant,),
         )
@@ -416,13 +416,13 @@ class TenantDatabase:
 
     def row_count(self) -> int:
         with self._lock:
-            return int(self._conn.execute(f"SELECT COUNT(*) FROM {AGENT_TABLE}").fetchone()[0])
+            return int(self._conn.execute(f"SELECT COUNT(*) FROM {AGENT_TABLE}").fetchone()[0])  # nosec B608
 
     def sample(self, n: int = 3) -> list[dict]:
         """A few of the tenant's own rows, for grounding the model's schema view."""
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT {', '.join(AGENT_COLUMNS)} FROM {AGENT_TABLE} LIMIT ?", (n,)
+                f"SELECT {', '.join(AGENT_COLUMNS)} FROM {AGENT_TABLE} LIMIT ?", (n,)  # nosec B608
             ).fetchall()
         return [dict(r) for r in rows]
 

@@ -26,7 +26,7 @@ def _read_notes(tenant: str, db_path: Path) -> list[tuple[int, str, str, str]]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
-            f"SELECT user_id, name, department, notes FROM {BASE_TABLE} "  # noqa: S608
+            f"SELECT user_id, name, department, notes FROM {BASE_TABLE} "  # noqa: S608  # nosec B608
             f"WHERE tenant_id = ? AND notes IS NOT NULL AND TRIM(notes) != ''",
             (tenant,),
         ).fetchall()
