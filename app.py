@@ -36,20 +36,22 @@ from secure_rls.security.principal import (  # noqa: E402
 # `agent`, `secure_rls.session` and `secure_rls.tools.factory` are imported
 # lazily, at their use sites, and every one of those sites runs after login.
 #
-# Not a style choice. `langchain_ollama` imports `transformers`, which imports
-# `torch` -- 21 of the 29 seconds it takes to import `agent`, for a client whose
-# job is posting JSON to localhost:11434. Nothing here uses either library
-# directly, so the cost is invisible in the code and entirely visible to the
-# user: at module scope it put the whole ML stack in front of the sign-in form.
+# Not a style choice. Measured with `streamlit.testing.v1.AppTest`, which runs
+# the script the way a connecting session does -- timing `streamlit run` until
+# the port answers measures nothing useful, because the HTTP shell is served
+# before the script executes:
 #
-# Measured with `streamlit.testing.v1.AppTest`, which runs the script the way a
-# connecting session does: 47.1s to render the login page, down to 8.8s once
-# these three moved. (Timing `streamlit run` until the port answers measures
-# nothing useful -- the HTTP shell is served before the script executes.)
+#     47.1s   originally
+#      8.8s   with these three imports deferred
+#      4.1s   and with the stray `transformers` import hidden
+#             (`secure_rls/_langchain_bootstrap.py` -- that one was the bulk of
+#             it, and deferring alone only moved the wait to the sign-in click)
 #
 # `_warm_agent_imports` below then pays the deferred cost off the critical path,
-# so the work is usually finished by the time credentials are typed rather than
-# starting when they are submitted. It costs first paint ~0.07s, which is noise.
+# so it is usually done by the time credentials are typed rather than starting
+# when they are submitted. It costs first paint ~0.07s, which is noise. The
+# whole cold sign-in path -- import, build_session, SecureAgent -- is now 3.4s
+# even when the warmer has not finished.
 
 st.set_page_config(page_title="Secure RLS Analyst", page_icon="•", layout="wide")
 

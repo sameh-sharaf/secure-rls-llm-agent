@@ -30,6 +30,10 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, TypedDict
 
 import pandas as pd
+
+# Imported for effect, and it must precede the langchain imports below: it hides
+# an optional dependency that would otherwise pull torch in. See its docstring.
+from secure_rls import _langchain_bootstrap  # noqa: F401  # isort: skip
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import InMemorySaver

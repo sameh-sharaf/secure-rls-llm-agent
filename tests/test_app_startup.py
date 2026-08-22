@@ -1,13 +1,17 @@
 """The sign-in page must not wait for the ML stack.
 
-`langchain_ollama` imports `transformers`, which imports `torch`: 21 of the 29
-seconds it takes to import `agent`, for a client that posts JSON to a local
-Ollama server. Nothing in this repository uses either library directly, so the
-cost is invisible in the code and entirely visible to the user -- imported at
-module scope it put the whole ML stack in front of the login form.
+`agent` pulls in langchain and, through it, an optional `transformers` import
+that drags `torch` behind it. At module scope that put the whole ML stack in
+front of the login form.
 
 Measured with `AppTest`, which runs the script as a connecting session does:
-47.1s to render the sign-in page, 8.8s with the three imports deferred.
+47.1s to render the sign-in page originally, 8.8s with the three imports
+deferred, 4.1s once `secure_rls/_langchain_bootstrap.py` also stopped the
+`transformers` import from happening at all.
+
+Deferring alone was not enough, and the reason is worth keeping: it moved the
+wait rather than removing it. The page appeared quickly and then the *sign-in
+click* blocked on the same import, which reads to a user as a broken login.
 
 These tests are cheap and exist to keep it that way. A regression here is one
 moved import line and produces no error, no failing behaviour and no clue.
