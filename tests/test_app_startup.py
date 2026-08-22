@@ -78,3 +78,34 @@ def test_the_security_modules_stay_light(module: str) -> None:
     assert "torch" not in sys.modules or "agent" in sys.modules, (
         f"importing {module} pulled in torch"
     )
+
+
+# --------------------------------------------------------------------------
+# the stale-process detector
+# --------------------------------------------------------------------------
+
+def test_stale_modules_names_edited_modules_but_not_the_script(monkeypatch) -> None:
+    """Pretend the process started at the epoch: every local module is stale.
+
+    The detector exists because Streamlit re-reads `app.py` on every rerun and
+    leaves what it imports in `sys.modules`. Editing `app.py` is therefore not
+    stale and must not be reported -- reporting it would train the reader to
+    ignore the warning, which is the only way this can fail badly.
+    """
+    import app
+
+    monkeypatch.setattr(app, "_code_loaded_at", lambda: 0.0)
+    stale = app.stale_modules()
+
+    assert stale, "with a zero start time every loaded local module is stale"
+    assert any(name.endswith("principal.py") for name in stale)
+    assert not any(name == "app.py" for name in stale)
+
+
+def test_stale_modules_is_quiet_when_nothing_changed(monkeypatch) -> None:
+    import time
+
+    import app
+
+    monkeypatch.setattr(app, "_code_loaded_at", lambda: time.time() + 3600)
+    assert app.stale_modules() == []

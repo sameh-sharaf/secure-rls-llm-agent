@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -80,6 +81,41 @@ def _warm_agent_imports() -> threading.Thread:
 
 
 _warm_agent_imports()
+
+
+@st.cache_resource(show_spinner=False)
+def _code_loaded_at() -> float:
+    """When this process imported its modules. Cached, so it is set once."""
+    return time.time()
+
+
+def stale_modules() -> list[str]:
+    """Local modules edited since the process started, and therefore stale.
+
+    Streamlit re-reads `app.py` from disk on every rerun but leaves everything
+    it imports in `sys.modules`, so after an edit under `secure_rls/` the script
+    is new and the modules are old. The failure that produces is an
+    `AttributeError` for a member that is plainly there in the file you are
+    looking at -- correct code, stale process. It has cost real time three
+    times now, twice while it looked like a genuine bug.
+
+    `app.py` itself is excluded: it is re-read, so editing it is not stale.
+    """
+    loaded = _code_loaded_at()
+    stale: list[str] = []
+    for module in list(sys.modules.values()):
+        file = getattr(module, "__file__", None)
+        if not file:
+            continue
+        path = Path(file)
+        if path.name == "app.py" or ROOT not in path.parents:
+            continue
+        try:
+            if path.stat().st_mtime > loaded:
+                stale.append(str(path.relative_to(ROOT)))
+        except OSError:  # deleted or unreadable mid-edit
+            continue
+    return sorted(set(stale))
 
 STATUS_ICON = {"ok": "🟢", "refused": "🟡", "blocked": "🔴", "info": "⚪"}
 
@@ -508,6 +544,16 @@ def render_internals(session) -> None:
 def main() -> None:
     if not ensure_built():
         return
+
+    stale = stale_modules()
+    if stale:
+        st.warning(
+            "**Restart the server.** These files changed after this process "
+            "started, and Streamlit does not re-import them:\n\n"
+            + "\n".join(f"- `{name}`" for name in stale)
+            + "\n\nThe script is running new code against old modules. Errors "
+            "from here will name members that exist in the file you are reading."
+        )
 
     if st.session_state.get("principal") is None:
         render_login()
