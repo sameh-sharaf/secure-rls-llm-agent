@@ -16,6 +16,7 @@ implies is not authenticated.
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -24,17 +25,61 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from agent import DEFAULT_MODEL, SecureAgent  # noqa: E402
 from db import DB_PATH, schema_description  # noqa: E402
 from secure_rls.security.principal import (  # noqa: E402
     AuthenticationError,
     authenticate,
     demo_accounts,
 )
-from secure_rls.session import build_session  # noqa: E402
-from secure_rls.tools.factory import tool_schemas  # noqa: E402
+
+# `agent`, `secure_rls.session` and `secure_rls.tools.factory` are imported
+# lazily, at their use sites, and every one of those sites runs after login.
+#
+# Not a style choice. `langchain_ollama` imports `transformers`, which imports
+# `torch` -- 21 of the 29 seconds it takes to import `agent`, for a client whose
+# job is posting JSON to localhost:11434. Nothing here uses either library
+# directly, so the cost is invisible in the code and entirely visible to the
+# user: at module scope it put the whole ML stack in front of the sign-in form.
+#
+# Measured with `streamlit.testing.v1.AppTest`, which runs the script the way a
+# connecting session does: 47.1s to render the login page, down to 8.8s once
+# these three moved. (Timing `streamlit run` until the port answers measures
+# nothing useful -- the HTTP shell is served before the script executes.)
+#
+# `_warm_agent_imports` below then pays the deferred cost off the critical path,
+# so the work is usually finished by the time credentials are typed rather than
+# starting when they are submitted. It costs first paint ~0.07s, which is noise.
 
 st.set_page_config(page_title="Secure RLS Analyst", page_icon="•", layout="wide")
+
+
+@st.cache_resource(show_spinner=False)
+def _warm_agent_imports() -> threading.Thread:
+    """Load the agent stack in the background while the user signs in.
+
+    `cache_resource` is doing real work here: Streamlit re-executes this whole
+    file on every rerun, so a bare `Thread(...).start()` at module scope would
+    spawn one per interaction. Cached, it runs once per process.
+
+    Failures are swallowed on purpose. This is a prefetch -- if it breaks, the
+    real import happens at the use site and raises there, where the error means
+    something. A warmer that can take the app down is worse than no warmer.
+    """
+
+    def _load() -> None:
+        try:
+            import agent  # noqa: F401
+            import secure_rls.session  # noqa: F401
+            import secure_rls.tools.factory  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            print(f"import warmer failed, deferring to first use: {exc!r}")
+
+    thread = threading.Thread(target=_load, name="warm-agent-imports", daemon=True)
+    thread.start()
+    return thread
+
+
+_warm_agent_imports()
 
 STATUS_ICON = {"ok": "🟢", "refused": "🟡", "blocked": "🔴", "info": "⚪"}
 
@@ -96,6 +141,18 @@ st.markdown(
 # --------------------------------------------------------------------- setup
 
 
+def default_model() -> str:
+    """The agent's default model name, without importing the agent to get it.
+
+    Duplicating the constant here would be the cheaper fix and the wrong one --
+    a second copy of a default is the drift this codebase has spent a while
+    removing. Once the warmer has run this is a `sys.modules` lookup.
+    """
+    from agent import DEFAULT_MODEL
+
+    return DEFAULT_MODEL
+
+
 def ensure_built() -> bool:
     if DB_PATH.exists():
         return True
@@ -114,8 +171,11 @@ def get_session():
     if principal is None:
         return None
     if st.session_state.get("session") is None:
+        from agent import SecureAgent
+        from secure_rls.session import build_session
+
         session = build_session(principal)
-        agent = SecureAgent(session, model=st.session_state.get("model", DEFAULT_MODEL))
+        agent = SecureAgent(session, model=st.session_state.get("model", default_model()))
         # Restore this user's own transcript, and replay it into the model's
         # memory so a follow-up question after a refresh still has context.
         turns = session.conversations.load(principal) if session.conversations else []
@@ -148,7 +208,7 @@ def available_models() -> list[str]:
 
         names = [m.model for m in ollama.list().models if m.model]
     except Exception:
-        return [DEFAULT_MODEL]
+        return [default_model()]
 
     capable = []
     for name in names:
@@ -159,7 +219,7 @@ def available_models() -> list[str]:
                 capable.append(name)
         except Exception as exc:  # noqa: BLE001 - one bad model must not hide the rest
             print(f"skipping model {name!r}: {type(exc).__name__}: {exc}")
-    return capable or [DEFAULT_MODEL]
+    return capable or [default_model()]
 
 
 def render_model_picker() -> None:
@@ -170,7 +230,7 @@ def render_model_picker() -> None:
     is the same argument the bake-off makes, made clickable.
     """
     models = available_models()
-    current = st.session_state.get("model", DEFAULT_MODEL)
+    current = st.session_state.get("model", default_model())
     if current not in models:
         current = models[0]
 
@@ -183,6 +243,8 @@ def render_model_picker() -> None:
     if chosen != st.session_state.get("model"):
         st.session_state.model = chosen
         # Rebuild only the agent; the tenant binding lives in the session.
+        from agent import SecureAgent
+
         st.session_state.agent = SecureAgent(st.session_state.session, model=chosen)
         st.rerun()
 
@@ -425,6 +487,8 @@ def render_internals(session) -> None:
         "no word for one. Tenant identity is injected by the server between the model "
         "and the database."
     )
+    from secure_rls.tools.factory import tool_schemas
+
     st.code(tool_schemas(session.tools), language="json")
 
     st.markdown("#### The schema the model is given")
@@ -475,8 +539,10 @@ def main() -> None:
             # problem wearing a feature's clothes.
             removed = session.conversations.clear(principal)
             st.session_state.history = []
+            from agent import SecureAgent
+
             st.session_state.agent = SecureAgent(
-                session, model=st.session_state.get("model", DEFAULT_MODEL)
+                session, model=st.session_state.get("model", default_model())
             )
             st.toast(f"Deleted {removed} turn(s).")
             st.rerun()

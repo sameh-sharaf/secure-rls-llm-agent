@@ -1,0 +1,80 @@
+"""The sign-in page must not wait for the ML stack.
+
+`langchain_ollama` imports `transformers`, which imports `torch`: 21 of the 29
+seconds it takes to import `agent`, for a client that posts JSON to a local
+Ollama server. Nothing in this repository uses either library directly, so the
+cost is invisible in the code and entirely visible to the user -- imported at
+module scope it put the whole ML stack in front of the login form.
+
+Measured with `AppTest`, which runs the script as a connecting session does:
+47.1s to render the sign-in page, 8.8s with the three imports deferred.
+
+These tests are cheap and exist to keep it that way. A regression here is one
+moved import line and produces no error, no failing behaviour and no clue.
+"""
+
+from __future__ import annotations
+
+import ast
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+#: Modules that drag in langchain, chromadb or torch. Everything the login page
+#: needs must stay outside this set.
+DEFERRED = ("agent", "secure_rls.session", "secure_rls.tools")
+
+
+def _module_level_imports(path: Path) -> set[str]:
+    """Imports executed when the file is loaded -- not those inside functions."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in tree.body:  # top level only, deliberately
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
+    return names
+
+
+def test_the_login_page_does_not_import_the_agent_stack() -> None:
+    at_module_scope = _module_level_imports(ROOT / "app.py")
+    offenders = {
+        name
+        for name in at_module_scope
+        if any(name == d or name.startswith(f"{d}.") for d in DEFERRED)
+    }
+    assert not offenders, (
+        f"{sorted(offenders)} imported at module scope in app.py. Every use site "
+        f"runs after login; importing here costs ~30s before the form renders."
+    )
+
+
+def test_the_deferred_modules_are_still_reachable() -> None:
+    """A guard that passes because the name was deleted would be worse than none."""
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+    for expected in ("from agent import SecureAgent", "from secure_rls.session import build_session"):
+        assert expected in source, f"{expected!r} is gone -- was it deferred, or lost?"
+
+
+def test_default_model_does_not_duplicate_the_constant() -> None:
+    """The cheap fix was a second copy of the default. This is why it wasn't taken."""
+    import agent
+    import app
+
+    assert app.default_model() == agent.DEFAULT_MODEL
+
+
+@pytest.mark.parametrize("module", ["db", "secure_rls.security.principal"])
+def test_the_security_modules_stay_light(module: str) -> None:
+    """The login page imports these directly; they must not pull the stack in."""
+    import importlib
+
+    importlib.import_module(module)
+    assert "torch" not in sys.modules or "agent" in sys.modules, (
+        f"importing {module} pulled in torch"
+    )

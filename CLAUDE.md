@@ -106,6 +106,12 @@ python -m evals.ablation
 
 - **Streamlit re-runs the whole script.** Re-read the principal from
   `st.session_state` every run; never rebuild it from a widget value.
+- **Restart the server after editing `secure_rls/`; a rerun is not enough.**
+  Streamlit's watcher re-executes `app.py` but does not reliably re-import the
+  modules it imports, so module-level objects -- `ROLE_POLICY`'s `ColumnPolicy`
+  instances, for one -- survive from the previous class definition. The symptom
+  is an `AttributeError` for a member that plainly exists in the file you are
+  looking at. Correct code, stale process; it has happened twice.
 - **LangGraph replaces state values** unless the field has a reducer — and a
   plain `operator.add` reducer then leaks accumulators across turns via the
   checkpointer. See `merge_steps` in `agent.py`.
