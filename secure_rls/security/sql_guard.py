@@ -34,7 +34,11 @@ from sqlglot import exp
 
 from db import AGENT_COLUMNS
 from secure_rls.security.layers import Layer, tag
-from secure_rls.security.spec import ENFORCE_MIN_COHORT, MIN_COHORT_SIZE
+from secure_rls.security.spec import (
+    ENFORCE_MIN_COHORT,
+    MAX_ROW_LIMIT,
+    MIN_COHORT_SIZE,
+)
 
 DIALECT = "sqlite"
 
@@ -55,7 +59,9 @@ ALLOWED_FUNCTIONS = frozenset(
     }
 )
 
-MAX_LIMIT = 200
+#: One cap, one definition. This used to be a separate 200 that happened to
+#: agree with the spec's, which is the arrangement that stops agreeing.
+MAX_LIMIT = MAX_ROW_LIMIT
 
 
 class SqlRejected(ValueError):

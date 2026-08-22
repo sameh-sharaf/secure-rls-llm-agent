@@ -35,6 +35,8 @@ from secure_rls.security.gateway import CohortTooSmall, QueryGateway, QueryResul
 from secure_rls.security.layers import layer_of
 from secure_rls.security.output_guard import LeakDetected
 from secure_rls.security.spec import (
+    DEFAULT_ROW_LIMIT,
+    MAX_ROW_LIMIT,
     Aggregate,
     Column,
     Metric,
@@ -137,7 +139,15 @@ class QueryEmployeesArgs(_Base):
     group_by: list[Column] = Field(default_factory=list, description="Columns to group by")
     order_by: Column | None = Field(default=None, description="Column to sort by")
     descending: bool = Field(default=True, description="Sort descending")
-    limit: int = Field(default=25, ge=1, le=200, description="Maximum rows to return")
+    limit: int = Field(
+        default=DEFAULT_ROW_LIMIT,
+        ge=1,
+        le=MAX_ROW_LIMIT,
+        description=(
+            "Maximum rows to return. Raise it when the question is about a whole "
+            "group and you intend to list its members; aggregates ignore it."
+        ),
+    )
 
 
 class RunSqlArgs(_Base):

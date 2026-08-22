@@ -48,6 +48,28 @@ MIN_COHORT_SIZE = 5
 ENFORCE_MIN_COHORT = False
 
 
+#: Rows a *listing* query returns, and the ceiling the model may raise it to.
+#:
+#: Not a security control. The tenant boundary is enforced below the query
+#: layer and is unaffected by these; what they bound is how much of a result
+#: gets pushed into the model's context, which costs synthesis latency and, past
+#: a point, coherence.
+#:
+#: The default was 25 and was too small to be honest about. Every department in
+#: every tenant is larger than that -- the biggest is 86 -- so any request of
+#: the form "report on the Sales team" silently returned a third of the team.
+#: The truncation notice fired, correctly, and the model then wrote its report
+#: from the truncated rows anyway. A default that is wrong for every realistic
+#: question is not a default, it is a trap. 100 covers the largest department in
+#: every tenant, which is the natural unit of a question here.
+#:
+#: Aggregates are unaffected: `LIMIT` applies to result rows, so `AVG(salary)`
+#: still reads the whole tenant and returns one row, and the gateway's
+#: percentile path explicitly overrides the cap to read all of it.
+DEFAULT_ROW_LIMIT = 100
+MAX_ROW_LIMIT = 200
+
+
 #: The columns the model may name, derived from the database catalog.
 #:
 #: This was a hand-written enum. It is generated now for the reason the author
@@ -189,7 +211,7 @@ class QuerySpec(BaseModel):
     group_by: list[Column] = Field(default_factory=list)
     order_by: Column | None = None
     descending: bool = True
-    limit: int = Field(default=50, ge=1, le=200)
+    limit: int = Field(default=DEFAULT_ROW_LIMIT, ge=1, le=MAX_ROW_LIMIT)
 
     @field_validator("filters")
     @classmethod
