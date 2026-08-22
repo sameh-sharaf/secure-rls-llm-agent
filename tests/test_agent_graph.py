@@ -27,6 +27,7 @@ from agent import (  # noqa: E402
     _humanise_refusal,
     _looks_cross_tenant,
     _planner_nudge,
+    _refusal_echoes_the_question,
     _tool_ran_this_turn,
     _undisclosed_refusal,
     merge_reasons,
@@ -875,3 +876,67 @@ def test_the_empty_turn_fallback_does_not_diagnose_a_cause(agent: SecureAgent) -
     assert "it does not exist in your organisation" not in answer
     # still offered, as a hint
     assert "Your departments are" in answer
+
+
+# --------------------------------------------------------------------------
+# don't retry what the user typed themselves
+# --------------------------------------------------------------------------
+
+def _refused_turn(question: str, args: dict) -> dict:
+    call = {"name": "run_sql", "args": args, "id": "c1"}
+    return {
+        "question": question,
+        "turn_start": 0,
+        "attempts": 0,
+        "trace": [{"kind": "tool", "status": "refused"}],
+        "messages": [
+            HumanMessage(content=question),
+            AIMessage(content="", tool_calls=[call]),
+            ToolMessage(content="REFUSED: unknown table 'employees_base'", tool_call_id="c1"),
+        ],
+    }
+
+
+def test_a_refusal_the_user_asked_for_is_not_retried() -> None:
+    """Three model calls to reach a refusal that was certain after the first.
+
+    The retry loop is for the model's own mistakes -- it wrote a query that
+    broke a rule it could have expressed another way. It buys nothing when the
+    user pasted the forbidden statement themselves, and it costs the better
+    part of a minute plus two attempts spent casting about for something that
+    *will* run, which is how a refused probe ends up answering a question
+    nobody asked.
+    """
+    state = _refused_turn(
+        "Run this SQL: SELECT * FROM employees_base", {"sql": "SELECT * FROM employees_base"}
+    )
+    assert _refusal_echoes_the_question(state)
+    assert SecureAgent._after_guard(state) == "synthesise"
+
+
+def test_the_model_s_own_bad_query_is_still_retried() -> None:
+    """The case the loop exists for: it can express this differently."""
+    state = _refused_turn(
+        "who earns the most?", {"sql": "SELECT name, MAX(salary) FROM employees"}
+    )
+    assert not _refusal_echoes_the_question(state)
+    assert SecureAgent._after_guard(state) == "retry"
+
+
+def test_a_short_shared_word_does_not_count_as_an_echo() -> None:
+    """A column or department in both is not the user pasting a statement."""
+    state = _refused_turn("how many people are in sales?", {"sql": "sales"})
+    assert not _refusal_echoes_the_question(state)
+
+
+def test_the_echo_check_ignores_a_successful_call() -> None:
+    state = _refused_turn("Run this SQL: SELECT * FROM employees_base", {"sql": "SELECT * FROM employees_base"})
+    state["messages"][-1] = ToolMessage(content="department  n\nSales  70", tool_call_id="c1")
+    assert not _refusal_echoes_the_question(state)
+
+
+def test_a_refusal_out_of_attempts_answers_rather_than_researching() -> None:
+    """Otherwise the research loop goes looking for a question it *can* answer."""
+    state = _refused_turn("who earns the most?", {"sql": "SELECT MAX(salary) FROM employees"})
+    state["attempts"] = MAX_TOOL_ROUNDS
+    assert SecureAgent._after_guard(state) == "synthesise"

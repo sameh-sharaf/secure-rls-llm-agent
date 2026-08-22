@@ -748,8 +748,16 @@ class SecureAgent:
         trace = state.get("trace", [])
         refused = [s for s in trace if s.get("kind") == "tool" and s.get("status") == "refused"]
         attempts = state.get("attempts", 0)
-        if refused and attempts < MAX_ATTEMPTS:
-            return "retry"
+        if refused:
+            # Nothing to revise when the user typed the refused thing themselves.
+            if _refusal_echoes_the_question(state):
+                return "synthesise"
+            if attempts < MAX_ATTEMPTS:
+                return "retry"
+            # Refused and out of attempts: answer with the reason rather than
+            # starting a research round, which would go looking for a question
+            # it *can* answer instead of the one that was asked.
+            return "synthesise"
         if state.get("rounds", 0) < MAX_TOOL_ROUNDS:
             return "plan"
         return "synthesise"
@@ -982,6 +990,58 @@ def _humanise_refusal(body: str) -> str:
 #: An L2 refusal means the model sent malformed arguments -- its problem, not
 #: the user's, and not something to read back to them as if it were a rule.
 _POLICY_LAYERS = ("L1", "L3", "L4", "L5")
+
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _refusal_echoes_the_question(state: AgentState) -> bool:
+    """Was the refused call simply the user's own words handed to a tool?
+
+    The retry loop exists for the model's mistakes: it wrote a query that broke
+    a rule it could have expressed differently, so it gets the reason back and
+    another go. That is worth two round trips.
+
+    It is worth nothing when the user pasted the forbidden thing themselves.
+    "Run this SQL: SELECT * FROM employees_base" is refused, retried, refused,
+    retried -- three model calls and the better part of a minute to arrive at a
+    refusal that was certain from the first one. Worse, the second and third
+    attempts are the model casting about for something that *will* run, which
+    is how a refused probe ends up answering a question nobody asked.
+
+    Detected by comparing the refused call's string arguments against the
+    question. An argument the user typed verbatim is not the model's reasoning
+    to revise; it is the request itself, and the answer is no.
+    """
+    question = _norm(state.get("question", ""))
+    if not question:
+        return False
+
+    messages = state.get("messages", [])[state.get("turn_start", 0):]
+    refused_ids = {
+        getattr(m, "tool_call_id", None)
+        for m in messages
+        if isinstance(m, ToolMessage) and str(m.content or "").startswith(("REFUSED", "BLOCKED"))
+    }
+    if not refused_ids:
+        return False
+
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            if call.get("id") not in refused_ids:
+                continue
+            for value in (call.get("args") or {}).values():
+                # Long enough not to fire on a stray word: a column name or a
+                # department that happens to appear in both is not the user
+                # pasting a statement.
+                if (
+                    isinstance(value, str)
+                    and len(value.strip()) >= 12
+                    and _norm(value) in question
+                ):
+                    return True
+    return False
 
 
 def _undisclosed_refusal(state: AgentState, answer: str) -> str:

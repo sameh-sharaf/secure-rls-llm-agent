@@ -105,3 +105,32 @@ def test_notes_tool_never_returns_another_tenants_canary(session) -> None:
         token = f"ZZ_CANARY_{tenant.upper()}"
         if token != own:
             assert token not in out
+
+
+def test_a_topicless_query_returns_a_sample_rather_than_nothing(session) -> None:
+    """"Read the employee notes" names nothing to search *for*.
+
+    The model passes an empty string or a wildcard, similarity search answers
+    with nothing, and the user is told "I could not find any employee notes to
+    read" -- which is false; there are five hundred.
+    """
+    retriever = session.context.retriever
+    for query in ("", "   ", "*", "all notes"):
+        assert retriever.search(query, top_k=3), f"{query!r} returned nothing"
+
+
+def test_the_sample_path_is_still_tenant_checked(session) -> None:
+    """A second way out of the index that skipped the check would be the bug.
+
+    The verification is shared with `search` for exactly this reason: a side
+    channel built alongside a boundary is the failure mode invariant 5b exists
+    for, and this is the same shape.
+    """
+    own = session.principal.tenant_id
+    for note in session.context.retriever.sample(top_k=10):
+        assert note.user_id in session.gateway.allowed_user_ids
+    for tenant in ("acme", "beta", "gamma"):
+        if tenant == own:
+            continue
+        blob = " ".join(n.text for n in session.context.retriever.sample(top_k=10))
+        assert f"ZZ_CANARY_{tenant.upper()}" not in blob

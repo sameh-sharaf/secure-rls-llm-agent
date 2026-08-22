@@ -70,9 +70,16 @@ class TenantNotesRetriever:
         """Give the retriever the independent id set for post-retrieval checks."""
         self._allowed_ids = allowed
 
+    #: Queries that name no topic. "Read the employee notes" gives the model
+    #: nothing to search *for*, and it passes one of these -- an empty string or
+    #: a wildcard -- which similarity search answers with nothing at all. The
+    #: user asked a reasonable question and got "I could not find any employee
+    #: notes to read", which is false: there are five hundred.
+    _TOPICLESS = frozenset({"", "*", "%", "all", "any", "all notes", "everything"})
+
     def search(self, query: str, top_k: int = 5) -> list[RetrievedNote]:
-        if not query or not query.strip():
-            return []
+        if (query or "").strip().lower() in self._TOPICLESS:
+            return self.sample(top_k)
         count = self._collection.count()
         if count == 0:
             return []
@@ -86,10 +93,31 @@ class TenantNotesRetriever:
             where={"tenant": self.tenant},
         )
 
-        documents = (result.get("documents") or [[]])[0]
-        metadatas = (result.get("metadatas") or [[]])[0]
-        distances = (result.get("distances") or [[]])[0]
+        return self._verified(
+            (result.get("documents") or [[]])[0],
+            (result.get("metadatas") or [[]])[0],
+            (result.get("distances") or [[]])[0],
+        )
 
+    def sample(self, top_k: int = 5) -> list[RetrievedNote]:
+        """A few of this tenant's notes, for a request that names no topic.
+
+        Goes through the same verification as a search. That is the whole point
+        of putting it here rather than in the tool: a second way to get rows out
+        of the index that skipped the tenant check would be exactly the kind of
+        side channel invariant 5b exists for.
+        """
+        count = self._collection.count()
+        if count == 0:
+            return []
+        result = self._collection.get(
+            where={"tenant": self.tenant}, limit=min(top_k, count)
+        )
+        documents = result.get("documents") or []
+        return self._verified(documents, result.get("metadatas") or [], [0.0] * len(documents))
+
+    def _verified(self, documents, metadatas, distances) -> list[RetrievedNote]:
+        """Check every chunk belongs to this tenant, then build the notes."""
         notes: list[RetrievedNote] = []
         for doc, meta, dist in zip(documents, metadatas, distances, strict=False):
             meta = meta or {}
