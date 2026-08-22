@@ -26,6 +26,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+from chat_ux import inject_chat_ux  # noqa: E402
 from db import DB_PATH, schema_description  # noqa: E402
 from secure_rls.security.principal import (  # noqa: E402
     AuthenticationError,
@@ -80,9 +81,6 @@ def _warm_agent_imports() -> threading.Thread:
     thread = threading.Thread(target=_load, name="warm-agent-imports", daemon=True)
     thread.start()
     return thread
-
-
-_warm_agent_imports()
 
 
 @st.cache_resource(show_spinner=False)
@@ -209,15 +207,14 @@ def get_session():
     if principal is None:
         return None
     if st.session_state.get("session") is None:
-        from agent import SecureAgent
         from secure_rls.session import build_session
 
+        # The session, not the agent. Signing in needs a database handle and a
+        # transcript; it does not need a model runtime, and building one here
+        # made login wait for something most of a session never uses. The agent
+        # is constructed on the first question -- see `get_agent`.
         session = build_session(principal)
-        agent = SecureAgent(session, model=st.session_state.get("model", default_model()))
-        # Restore this user's own transcript, and replay it into the model's
-        # memory so a follow-up question after a refresh still has context.
         turns = session.conversations.load(principal) if session.conversations else []
-        agent.restore(turns)
         st.session_state.history = [
             {
                 "question": t.question,
@@ -225,12 +222,39 @@ def get_session():
                 "trace": t.trace,
                 "artifacts": [],
                 "model": t.model,
+                "seconds": t.seconds,
             }
             for t in turns
         ]
         st.session_state.session = session
-        st.session_state.agent = agent
+        st.session_state.agent = None
+        # Start pulling the agent stack in behind the login, so the first
+        # question usually finds it already imported.
+        _warm_agent_imports()
     return st.session_state.session
+
+
+def get_agent():
+    """Build the agent on first use, replaying this user's transcript into it.
+
+    Deferred deliberately. `SecureAgent` construction plus the imports behind it
+    is a few seconds that every sign-in was paying whether or not a question
+    followed. The model itself is lazier still -- Ollama does not load weights
+    until the first inference -- so nothing here reserves a GPU either.
+    """
+    if st.session_state.get("agent") is None:
+        from agent import SecureAgent
+
+        session = st.session_state.session
+        agent = SecureAgent(session, model=st.session_state.get("model", default_model()))
+        # Replay the stored transcript into the model's memory, so a follow-up
+        # after a refresh still has context. Same turns the UI is showing.
+        turns = (
+            session.conversations.load(session.principal) if session.conversations else []
+        )
+        agent.restore(turns)
+        st.session_state.agent = agent
+    return st.session_state.agent
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -280,10 +304,10 @@ def render_model_picker() -> None:
     )
     if chosen != st.session_state.get("model"):
         st.session_state.model = chosen
-        # Rebuild only the agent; the tenant binding lives in the session.
-        from agent import SecureAgent
-
-        st.session_state.agent = SecureAgent(st.session_state.session, model=chosen)
+        # Drop the agent rather than rebuilding it; the tenant binding lives in
+        # the session and survives. `get_agent` rebuilds on the next question,
+        # so switching models before asking anything costs nothing.
+        st.session_state.agent = None
         st.rerun()
 
 
@@ -369,6 +393,22 @@ def render_artifacts(artifacts: list) -> None:
                 st.caption(f"policy: {rewrite}")
 
 
+def _answer_caption(entry: dict) -> str:
+    """`answered by gemma4 - 12.3s`, with either half omitted if unknown.
+
+    Turns stored before the `seconds` column existed read as 0.0, which means
+    "not recorded" rather than "instant" -- showing 0.0s for them would be a
+    figure the system never measured.
+    """
+    parts = []
+    if entry.get("model"):
+        parts.append(f"answered by `{entry['model']}`")
+    seconds = float(entry.get("seconds") or 0.0)
+    if seconds > 0:
+        parts.append(f"{seconds:.1f}s")
+    return " · ".join(parts)
+
+
 def render_chat(session) -> None:
     """Transcript first, input last -- the ordinary chat shape.
 
@@ -382,28 +422,37 @@ def render_chat(session) -> None:
     """
     st.subheader("Ask about your workforce")
 
+    #: Message text in render order, handed to the copy buttons. Read from here
+    #: rather than scraped out of the DOM, which would also sweep up the
+    #: reasoning expander and the caption.
+    texts: list[str] = []
+
     for entry in st.session_state.get("history", []):
         with st.chat_message("user"):
             st.write(entry["question"])
+        texts.append(entry["question"])
         with st.chat_message("assistant"):
             st.write(entry["answer"])
-            if entry.get("model"):
-                st.caption(f"answered by `{entry['model']}`")
+            st.caption(_answer_caption(entry))
             if entry.get("trace"):
                 with st.expander("Reasoning, tools and executed SQL"):
                     render_trace(entry["trace"])
             render_artifacts(entry.get("artifacts", []))
+        texts.append(entry["answer"])
 
     pending = st.session_state.pop("pending_question", None)
     if pending:
         with st.chat_message("user"):
             st.write(pending)
         with st.chat_message("assistant"), st.spinner("Planning, querying, checking…"):
-            reply = st.session_state.agent.ask(pending)
+            agent = get_agent()
+            started = time.perf_counter()
+            reply = agent.ask(pending)
+            elapsed = time.perf_counter() - started
         # The agent, not the sidebar picker: if the model was switched while a
         # question was in flight, the picker already shows the new one and the
         # answer came from the old.
-        answered_by = getattr(st.session_state.agent, "model_name", "")
+        answered_by = getattr(agent, "model_name", "")
         st.session_state.history.append(
             {
                 "question": pending,
@@ -411,15 +460,18 @@ def render_chat(session) -> None:
                 "trace": reply.trace,
                 "artifacts": reply.artifacts,
                 "model": answered_by,
+                "seconds": elapsed,
             }
         )
         if session.conversations:
             # Artifacts are deliberately not persisted: large, re-derivable by
             # asking again, and each one is another copy of tenant data.
             session.conversations.append(
-                session.principal, pending, reply.answer, reply.trace, answered_by
+                session.principal, pending, reply.answer, reply.trace, answered_by, elapsed
             )
         st.rerun()
+
+    inject_chat_ux(texts)
 
     if prompt := st.chat_input("e.g. Which department has the highest average salary?"):
         st.session_state.pending_question = prompt
@@ -476,7 +528,7 @@ def render_security(session) -> None:
     st.code(ATTACKS[choice], language="text")
     if st.button("Run this attack", type="primary"):
         with st.spinner("Running…"):
-            reply = st.session_state.agent.ask(ATTACKS[choice], thread="attack-console")
+            reply = get_agent().ask(ATTACKS[choice], thread="attack-console")
         st.markdown("**Result**")
         st.write(reply.answer)
         render_trace(reply.trace)
@@ -587,11 +639,10 @@ def main() -> None:
             # problem wearing a feature's clothes.
             removed = session.conversations.clear(principal)
             st.session_state.history = []
-            from agent import SecureAgent
-
-            st.session_state.agent = SecureAgent(
-                session, model=st.session_state.get("model", default_model())
-            )
+            # Drop the agent so its replayed memory of the deleted turns goes
+            # with them. Erasure that leaves the model still able to recall the
+            # transcript is not erasure.
+            st.session_state.agent = None
             st.toast(f"Deleted {removed} turn(s).")
             st.rerun()
         if st.button("Sign out"):

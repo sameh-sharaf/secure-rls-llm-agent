@@ -210,3 +210,24 @@ def test_a_database_from_before_the_column_still_opens(tmp_path: Path) -> None:
 
     store.append(p, "new q", "new a", [], "gemma4:26b-a4b-it-q4_K_M")
     assert [t.model for t in store.load(p)] == ["", "gemma4:26b-a4b-it-q4_K_M"]
+
+
+def test_the_answer_duration_survives_a_reload(store: ConversationStore) -> None:
+    """Shown in the transcript, so it has to be stored rather than re-derived.
+
+    Summing the trace's per-step timings is close and not the same number -- it
+    misses everything between the steps -- and a figure shown to a user should
+    be the one that was measured.
+    """
+    who = authenticate("acme_admin", "acme123")
+    store.append(who, "q", "a", [], "gemma4", 12.75)
+    assert store.load(who)[0].seconds == 12.75
+
+
+def test_a_turn_stored_without_a_duration_reads_as_unknown(store: ConversationStore) -> None:
+    """0.0 means "not recorded". The caption omits it rather than showing 0.0s,
+    which would be a figure the system never measured -- the same rule the
+    grounding guard applies to the model."""
+    who = authenticate("acme_admin", "acme123")
+    store.append(who, "q", "a", [])
+    assert store.load(who)[0].seconds == 0.0

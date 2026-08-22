@@ -65,6 +65,14 @@ class Turn:
     #: model and half from a stronger one, with no way to tell which, is a
     #: transcript you cannot judge.
     model: str = ""
+    #: Wall-clock seconds the agent took to produce this answer.
+    #:
+    #: Recorded rather than derived. The trace carries per-step timings and
+    #: summing them is close but not the same number -- it misses everything
+    #: between the steps -- and a figure shown to a user should be the one that
+    #: was measured. Older rows have no value and read as 0.0, which the UI
+    #: takes as "unknown" and does not render.
+    seconds: float = 0.0
 
 
 class ConversationStore:
@@ -92,7 +100,8 @@ class ConversationStore:
                     question  TEXT NOT NULL,
                     answer    TEXT NOT NULL,
                     trace     TEXT NOT NULL,
-                    model     TEXT NOT NULL DEFAULT ''
+                    model     TEXT NOT NULL DEFAULT '',
+                    seconds   REAL NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -112,7 +121,10 @@ class ConversationStore:
         to add a column would undercut the feature it is extending.
         """
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(turns)")}
-        for column, ddl in (("model", "TEXT NOT NULL DEFAULT ''"),):
+        for column, ddl in (
+            ("model", "TEXT NOT NULL DEFAULT ''"),
+            ("seconds", "REAL NOT NULL DEFAULT 0"),
+        ):
             if column not in existing:
                 conn.execute(f"ALTER TABLE turns ADD COLUMN {column} {ddl}")
         conn.commit()
@@ -132,13 +144,14 @@ class ConversationStore:
         answer: str,
         trace: list[dict],
         model: str = "",
+        seconds: float = 0.0,
     ) -> None:
         """Record one turn, redacted, and trim to the retention cap."""
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO turns"
-                " (tenant_id, username, role, ts, question, answer, trace, model)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " (tenant_id, username, role, ts, question, answer, trace, model, seconds)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     principal.tenant_id,
                     principal.username,
@@ -148,6 +161,7 @@ class ConversationStore:
                     OutputGuard.redact(answer) or "",
                     json.dumps(trace or [], default=str),
                     model,
+                    float(seconds or 0.0),
                 ),
             )
             # Trim within this principal only -- never touch another user's rows.
@@ -182,7 +196,7 @@ class ConversationStore:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT question, answer, trace, ts, model FROM turns
+                SELECT question, answer, trace, ts, model, seconds FROM turns
                  WHERE tenant_id = ? AND username = ? AND role = ?
                  ORDER BY id DESC LIMIT ?
                 """,
@@ -195,6 +209,7 @@ class ConversationStore:
                 trace=json.loads(row["trace"]),
                 timestamp=row["ts"],
                 model=row["model"] or "",
+                seconds=row["seconds"] or 0.0,
             )
             for row in reversed(rows)
         ]
