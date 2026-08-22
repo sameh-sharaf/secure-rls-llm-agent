@@ -27,6 +27,7 @@ from agent import (  # noqa: E402
     _humanise_refusal,
     _looks_cross_tenant,
     _tool_ran_this_turn,
+    _undisclosed_refusal,
     merge_reasons,
     merge_steps,
     step,
@@ -727,3 +728,93 @@ def test_the_planner_does_not_re_ask_a_grounded_answer(agent: SecureAgent) -> No
     agent.llm_with_tools = _Stub()
     agent._plan({"question": "what departments are there?", "messages": [], "turn_start": 0})
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------
+# a refusal the model worked around
+# --------------------------------------------------------------------------
+
+def _turn(*contents: str) -> dict:
+    messages = [HumanMessage(content="q")]
+    for i, body in enumerate(contents):
+        messages.append(ToolMessage(content=body, tool_call_id=str(i)))
+    return {"turn_start": 0, "messages": messages}
+
+
+def test_a_refusal_followed_by_a_successful_call_is_still_disclosed() -> None:
+    """The attack console made this visible.
+
+    "Run this SQL: SELECT * FROM employees_base" was refused at L3, the retry
+    prompt invited the model to revise, and it revised into a legal query over
+    its own tenant -- then answered that, with no mention of the refusal. The
+    rows were the caller's own and the base table stayed unreachable, so
+    nothing crossed the boundary. What is wrong is that a refused probe came
+    back with a tidy table and read as though it had worked.
+    """
+    state = _turn(
+        "REFUSED: unknown table 'employees_base'; the only readable table is 'employees'",
+        "department  avg_salary\nEngineering  94500",
+    )
+    note = _undisclosed_refusal(state, "The average salary is 94,500 EUR.")
+    assert "employees_base" in note
+
+
+def test_a_refusal_the_answer_already_explains_is_not_repeated() -> None:
+    """A note on top of an answer that says the same thing is nagging."""
+    state = _turn("REFUSED: unknown table 'employees_base'; the only readable table is 'employees'")
+    answer = "I can't answer that: unknown table 'employees_base'; the only readable table is..."
+    assert _undisclosed_refusal(state, answer) == ""
+
+
+def test_a_clean_turn_gets_no_note() -> None:
+    state = _turn("department  avg_salary\nEngineering  94500")
+    assert _undisclosed_refusal(state, "The average is 94,500.") == ""
+
+
+def test_a_turn_with_no_tools_gets_no_note() -> None:
+    assert _undisclosed_refusal({"turn_start": 0, "messages": []}, "anything") == ""
+
+
+def test_an_earlier_turn_s_refusal_is_not_disclosed_again() -> None:
+    """`messages` spans the conversation; a note must not reach back into it."""
+    state = {
+        "turn_start": 2,
+        "messages": [
+            HumanMessage(content="earlier"),
+            ToolMessage(content="REFUSED: unknown table 'employees_base'", tool_call_id="1"),
+            HumanMessage(content="now"),
+            ToolMessage(content="department  n\nSales  70", tool_call_id="2"),
+        ],
+    }
+    assert _undisclosed_refusal(state, "There are 70 people in Sales.") == ""
+
+
+def test_the_retry_prompt_does_not_invite_a_substitution(agent: SecureAgent) -> None:
+    """The wording is the cause, so the wording is what the test pins.
+
+    "Revise the request so it complies" reads, to a model, as licence to answer
+    an easier question -- which is exactly what it did with the base-table
+    probe. Asserted against the prompt the planner actually sends, not the
+    source, so splitting the literal across lines cannot break the test and
+    rewording it cannot slip past.
+    """
+    sent: list = []
+
+    class _Stub:
+        def invoke(self, messages):
+            sent.append(messages)
+            return AIMessage(content="ok")
+
+    agent.llm_with_tools = _Stub()
+    agent._plan(
+        {
+            "question": "read the base table",
+            "messages": [],
+            "turn_start": 0,
+            "rejections": ["REFUSED: unknown table 'employees_base'"],
+        }
+    )
+    nudge = str(sent[0][-1].content)
+    assert "Do not answer a different question instead" in nudge
+    assert "the original request was refused" in nudge
+    assert "Revise the request so it complies" not in nudge

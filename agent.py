@@ -407,8 +407,10 @@ class SecureAgent:
                     content=(
                         "Your previous tool call was refused by policy:\n"
                         f"{rejections[-1]}\n"
-                        "Revise the request so it complies, or explain to the user why the "
-                        "question cannot be answered within policy."
+                        "Express the *same* request in a form the policy allows, or "
+                        "explain why it cannot be answered. Do not answer a different "
+                        "question instead, and say plainly that the original request "
+                        "was refused and why."
                     )
                 )
             )
@@ -682,6 +684,12 @@ class SecureAgent:
                          layer="L5 output guard", seconds=time.perf_counter() - started)
                 ],
             }
+
+        # A refused call that a later call worked around must not vanish from
+        # the answer. Prepended rather than asked for: see `_undisclosed_refusal`.
+        note = _undisclosed_refusal(state, text)
+        if note:
+            text = f"{note}\n\nWhat I could answer within policy:\n\n{text}"
 
         # Last check before the answer reaches a human.
         try:
@@ -971,6 +979,42 @@ def _humanise_refusal(body: str) -> str:
 #: An L2 refusal means the model sent malformed arguments -- its problem, not
 #: the user's, and not something to read back to them as if it were a rule.
 _POLICY_LAYERS = ("L1", "L3", "L4", "L5")
+
+
+def _undisclosed_refusal(state: AgentState, answer: str) -> str:
+    """A refusal this turn that the answer never mentions.
+
+    `_refusal_answer` covers the turn where *everything* was refused. This
+    covers the more slippery one, where a call was refused and a later call
+    succeeded: the retry prompt invites the model to "revise the request so it
+    complies", and a model reads "read the base table" -> "read the table I am
+    allowed to read" as a compliant revision. It then answers that instead,
+    with the caller's own rows, and says nothing about the refusal.
+
+    Nothing crosses the boundary -- the rows are the caller's own and the base
+    table stayed unreachable. What is wrong is that the user asked one question
+    and was silently answered a different one. In the attack console it is worse
+    than wrong: a refused probe that comes back with a tidy table reads as
+    though it worked.
+
+    Deterministic rather than prompted. The model has already shown, in the run
+    that prompted this, that it will not mention the refusal on its own.
+    """
+    messages = state.get("messages", [])[state.get("turn_start", 0):]
+    reasons = [
+        _humanise_refusal(str(m.content))
+        for m in messages
+        if isinstance(m, ToolMessage) and str(m.content or "").startswith(("REFUSED", "BLOCKED"))
+    ]
+    reasons = [r for r in reasons if r]
+    if not reasons:
+        return ""
+    first = reasons[0]
+    # If the answer already says it, a note on top would just be nagging.
+    core = first.removeprefix("I can't answer that: ").rstrip(".").lower()
+    if core and core[:40] in answer.lower():
+        return ""
+    return first
 
 
 def _refusal_answer(state: AgentState) -> tuple[str | None, str | None]:
