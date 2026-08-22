@@ -50,6 +50,17 @@ project exists to demonstrate.
    column they disclose an individual and no cohort-size rule will catch it.
    See `EXTREMAL_AGGREGATES` in `spec.py`.
 
+5d. **The aggregate exemption applies to `metrics` and to nothing else.**
+   A masked column may be combined into a statistic. It may not be projected,
+   grouped by, filtered on or ordered by -- a predicate discloses the value one
+   comparison at a time, and an ordering discloses who sits at the top of it.
+   Enforced for every position by `check_masked_columns` in `spec.py`, which is
+   the *only* place the rule is written: it had two implementations that
+   disagreed for a while, and `sql_guard` was the one that happened to be right.
+   Call it from any new path that accepts a caller's `QuerySpec` -- the
+   gateway's percentile branch compiles its own spec and had to be given the
+   call explicitly.
+
 6. **Every new tool needs a red-team case** in `evals/redteam.yaml` before it
    merges, and a unit test asserting its schema carries no tenant parameter.
 

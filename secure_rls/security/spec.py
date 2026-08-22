@@ -271,6 +271,89 @@ def _referenced_columns(spec: QuerySpec) -> set[str]:
     return names
 
 
+def _non_aggregate_positions(spec: QuerySpec) -> list[tuple[str, str]]:
+    """(column, position) for every reference *outside* an aggregate.
+
+    Masking permits exactly one thing: combining many values into one. Every
+    other way of naming the column -- projecting it, grouping by it, filtering
+    on it, ordering by it -- reaches an individual, so the aggregate exemption
+    must not extend to any of them.
+
+    `metrics` is deliberately absent: that is the exempt position, policed
+    separately by `EXTREMAL_AGGREGATES`. A column appearing in both a metric
+    and a filter is still refused, because the filter is a disclosure channel
+    regardless of what else the spec asks for.
+    """
+    found = [(c.value, "select") for c in spec.select]
+    found += [(c.value, "group_by") for c in spec.group_by]
+    found += [(f.column.value, "filter") for f in spec.filters]
+    if spec.order_by is not None:
+        found.append((spec.order_by.value, "order_by"))
+    return found
+
+
+#: How to explain a masked column refused in each position. Each says what the
+#: caller *can* do instead: a refusal with no alternative is an obstacle, and an
+#: obstacle is what people route around.
+_MASK_REFUSAL = {
+    "select": (
+        "your role may not read {col} for individual employees. You can still "
+        "describe the range: p90 for the top of it, median for typical, or "
+        "average {col} by department"
+    ),
+    "group_by": (
+        "your role may not group by {col}: each group is one distinct value of a "
+        "column you may not read for an individual. Group by department or "
+        "hire_date instead and aggregate {col} within the group"
+    ),
+    "filter": (
+        "your role may not filter on {col}: a predicate on a column you cannot "
+        "read still discloses it, one comparison at a time. Filter on department, "
+        "hire_date or performance_score instead, and aggregate {col} within that "
+        "group"
+    ),
+    "order_by": (
+        "your role may not order by {col}: ranking people by a column you cannot "
+        "read discloses who sits at the top of it. Order by another column, or "
+        "ask for an aggregate such as average or p90"
+    ),
+}
+
+
+def check_masked_columns(spec: QuerySpec, masked_columns: frozenset[str]) -> None:
+    """Enforce the role's column mask across every position of a spec.
+
+    Split out of `compile_spec` because it has a second caller: the gateway's
+    percentile path builds its own internal spec and so never reaches the
+    compiler with the *caller's* spec in hand. Enforcement that lives only in
+    the compiler is enforcement one dispatch branch can step around, which is
+    invariant 5b applied to the query path rather than the prompt.
+    """
+    if not masked_columns:
+        return
+
+    for column, position in _non_aggregate_positions(spec):
+        if column in masked_columns:
+            raise tag(
+                SpecError(_MASK_REFUSAL[position].format(col=column)),
+                Layer.L1,  # the role decides; layer 3 only enforces the decision
+            )
+
+    for metric in spec.metrics:
+        if metric.column.value in masked_columns and metric.agg.value in EXTREMAL_AGGREGATES:
+            raise tag(
+                SpecError(
+                    f"your role may not read {metric.column.value} for individual "
+                    f"employees, and {metric.agg.value.upper()}({metric.column.value}) "
+                    f"reports one specific person's {metric.column.value}. For the top of "
+                    f"the range use p90, or use an average or median -- and say plainly "
+                    f"which statistic you computed, never presenting it as the "
+                    f"{metric.agg.value}"
+                ),
+                Layer.L1,
+            )
+
+
 def compile_spec(
     spec: QuerySpec,
     *,
@@ -309,30 +392,7 @@ def compile_spec(
             Layer.L1,
         )
 
-    for column in spec.select:
-        if column.value in masked_columns:
-            raise tag(
-                SpecError(
-                    f"your role may not read {column.value} for individual employees. "
-                    f"You can still describe the range: p90 for the top of it, median "
-                    f"for typical, or average {column.value} by department"
-                ),
-                Layer.L1,  # the role decides; layer 3 only enforces the decision
-            )
-
-    for metric in spec.metrics:
-        if metric.column.value in masked_columns and metric.agg.value in EXTREMAL_AGGREGATES:
-            raise tag(
-                SpecError(
-                    f"your role may not read {metric.column.value} for individual "
-                    f"employees, and {metric.agg.value.upper()}({metric.column.value}) "
-                    f"reports one specific person's {metric.column.value}. For the top of "
-                    f"the range use p90, or use an average or median -- and say plainly "
-                    f"which statistic you computed, never presenting it as the "
-                    f"{metric.agg.value}"
-                ),
-                Layer.L1,
-            )
+    check_masked_columns(spec, masked_columns)
 
     projections: list[str] = [c.value for c in spec.group_by]
     projections += [c.value for c in spec.select if c not in spec.group_by]

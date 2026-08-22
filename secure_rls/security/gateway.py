@@ -27,6 +27,7 @@ from secure_rls.security.spec import (
     MIN_COHORT_SIZE,
     QuerySpec,
     SpecError,
+    check_masked_columns,
     cohort_size_query,
     compile_spec,
 )
@@ -154,6 +155,19 @@ class QueryGateway:
         import pandas as pd
 
         started = time.perf_counter()
+
+        # The caller's spec is checked here, against the caller's own mask,
+        # before the internal fetch below replaces it. `run_spec` dispatches to
+        # this method *before* it compiles anything, so without this line a
+        # masked column reached the database through `filters` on the percentile
+        # path while the ordinary path refused it -- the compiler cannot enforce
+        # a policy on a spec it never sees.
+        try:
+            check_masked_columns(spec, self.principal.policy.masked_columns())
+        except SpecError as exc:
+            self._audit(tool, spec.model_dump_json(), None, 0, "n/a", f"rejected: {exc}", started)
+            raise
+
         metric = next(m for m in spec.metrics if m.agg.value in GATEWAY_COMPUTED)
         quantile = GATEWAY_COMPUTED[metric.agg.value]
 

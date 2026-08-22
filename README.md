@@ -11,6 +11,28 @@ instructed not to.
 
 ---
 
+## Contents
+
+| | |
+|---|---|
+| [Repository layout](#repository-layout) | What each file is for, and what to read first |
+| [Architecture](#architecture) | The five layers, and which one is the boundary |
+| &nbsp;&nbsp;· [Tenant binding](#tenant-binding) | Why `tenant_id` is not a tool parameter |
+| &nbsp;&nbsp;· [How SQLite gets real row-level security](#how-sqlite-gets-real-row-level-security) | Materialised temp table + authorizer |
+| &nbsp;&nbsp;· [The agent](#the-agent) | The LangGraph topology and the guard node |
+| [Setup](#setup) | Install, build the data, run the app |
+| &nbsp;&nbsp;· [Tenant credentials](#tenant-credentials) | The six demo logins |
+| [Security testing](#security-testing) | Attack console, red-team categories, sample attacks |
+| [Evaluation](#evaluation) | Suites, gates, and how the verdict is computed |
+| &nbsp;&nbsp;· [Measured result](#measured-result) | 0.00% cross-tenant leak rate |
+| &nbsp;&nbsp;· [Model bake-off](#model-bake-off) | Three local models, same suites |
+| &nbsp;&nbsp;· [Two role-boundary defects](#two-role-boundary-defects-found-by-the-bake-off) | What the bake-off found, and the fixes |
+| [Testing](#testing) | 377 tests, no model required |
+| [Challenges](#challenges) | The problems worth writing down |
+| [Time spent](#time-spent) | ~30 hours, by phase |
+
+---
+
 ## Repository layout
 
 ```
@@ -202,7 +224,7 @@ evaluation is a first-class part of the deliverable.
 
 | Suite | What it measures | Gate |
 |---|---|---|
-| `redteam.yaml` (53 cases) | Leak rate across 10 attack categories | **leak rate must be 0.00%** |
+| `redteam.yaml` (55 cases) | Leak rate across 10 attack categories | **leak rate must be 0.00%** |
 | `correctness.yaml` (25 cases) | Answer accuracy vs pandas ground truth, tool selection, refusal accuracy | tracked, not gated |
 | `--model` sweep | Leak rate and accuracy across models | leak rate must stay 0 for all |
 
@@ -229,10 +251,11 @@ evaluation is a first-class part of the deliverable.
 | role escalation | 4 | 0 | multi-turn drift | 3 | 0 |
 
 Those counts are the suite **as it stood for that run**. It has since grown to
-53: the `MIN`/`MAX` handling described below added two `differencing` cases and
-one `role_escalation` case, so a run today reports 53 rather than 50. The
-recorded JSON in `evals/results/` is the 50-case run and is left as it was — a
-measurement is dated evidence, not a number to keep edited into agreement.
+55: the `MIN`/`MAX` handling described below added two `differencing` cases and
+one `role_escalation` case, and closing the mask across `filters` and
+`order_by` added two more `role_escalation` cases. The recorded JSON in
+`evals/results/` is the 50-case run and is left as it was — a measurement is
+dated evidence, not a number to keep edited into agreement.
 
 The first full run scored 46/50 with the same **0.00% leak rate**. All four
 misses were refusals that worked and then failed to *explain* themselves — the
@@ -329,7 +352,7 @@ python -m evals.report evals/results/*.json
 ## Testing
 
 ```bash
-python -m pytest tests/ -q      # 364 tests, no model required
+python -m pytest tests/ -q      # 377 tests, no model required
 ```
 
 `tests/test_boundary.py` is the central one: a fixed corpus of smuggling
