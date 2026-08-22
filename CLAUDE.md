@@ -54,6 +54,13 @@ project exists to demonstrate.
    `evals/ablation.py` fires the attack at the gateway with no model and no
    prompt in the picture at all, and expects the layers to hold anyway.
 
+8. **The column allowlist is derived, never written down.** It comes from the
+   database catalog at startup (`db.introspect_columns`), and `Column` plus
+   `ALLOWED_COLUMNS` are generated from it. Do not reintroduce a hand-written
+   list -- three of them existed and nothing kept them in step. `TENANT_COLUMN`
+   stays configuration: which column carries the boundary is the one fact a
+   catalog cannot tell you. See ADR-0005.
+
 ## Layout
 
 ```

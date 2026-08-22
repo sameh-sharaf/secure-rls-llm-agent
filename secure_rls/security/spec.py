@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from db import AGENT_COLUMNS
 from secure_rls.security.layers import Layer, tag
 
 #: Minimum number of underlying rows behind any reported aggregate.
@@ -47,14 +48,20 @@ MIN_COHORT_SIZE = 5
 ENFORCE_MIN_COHORT = False
 
 
-class Column(StrEnum):
-    USER_ID = "user_id"
-    NAME = "name"
-    DEPARTMENT = "department"
-    SALARY = "salary"
-    PERFORMANCE_SCORE = "performance_score"
-    HIRE_DATE = "hire_date"
-    NOTES = "notes"
+#: The columns the model may name, derived from the database catalog.
+#:
+#: This was a hand-written enum. It is generated now for the reason the author
+#: of the third copy always discovers too late: `db.AGENT_COLUMNS`, this enum
+#: and `sql_guard.ALLOWED_COLUMNS` were three statements of one fact, and
+#: nothing made them agree. Adding a column meant editing three files and
+#: hoping; forgetting one meant the guard silently disagreed with the schema
+#: the model was given.
+#:
+#: A generated enum is exactly as strong a control as a written one. The model
+#: still cannot name a column outside it -- Pydantic rejects the value -- and
+#: the contents still come from a trusted, privileged read rather than from
+#: anything the model said.
+Column = StrEnum("Column", {name.upper(): name for name in AGENT_COLUMNS})
 
 
 class Aggregate(StrEnum):

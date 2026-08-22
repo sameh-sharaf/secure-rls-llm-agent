@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 import sqlglot
 from sqlglot import exp
 
+from db import AGENT_COLUMNS
 from secure_rls.security.layers import Layer, tag
 from secure_rls.security.spec import ENFORCE_MIN_COHORT, MIN_COHORT_SIZE
 
@@ -40,9 +41,8 @@ DIALECT = "sqlite"
 #: The only relation the agent may name.
 ALLOWED_TABLES = frozenset({"employees"})
 
-ALLOWED_COLUMNS = frozenset(
-    {"user_id", "name", "department", "salary", "performance_score", "hire_date", "notes"}
-)
+#: Same source as the model's vocabulary, so the two cannot drift apart.
+ALLOWED_COLUMNS = frozenset(AGENT_COLUMNS)
 
 #: Scalar and aggregate functions the agent may call. Anything absent is
 #: rejected -- fail closed, so a SQLite build with extra functions compiled in

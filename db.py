@@ -64,18 +64,66 @@ BASE_TABLE = "employees_base"
 #: The per-connection relation the agent is allowed to query.
 AGENT_TABLE = "employees"
 
-#: Columns exposed to the agent. `tenant_id` is deliberately not among them:
-#: inside a session there is only one tenant, so the column carries no
-#: information and its absence removes a word from the model's vocabulary.
-AGENT_COLUMNS: tuple[str, ...] = (
-    "user_id",
-    "name",
-    "department",
-    "salary",
-    "performance_score",
-    "hire_date",
-    "notes",
+#: The column that identifies the tenant. Configuration, not discovery: which
+#: column carries the boundary is the one thing a catalog cannot tell you.
+TENANT_COLUMN = "tenant_id"
+
+#: Fallback used only when the database has not been built yet -- a fresh clone
+#: before `scripts/build_db.py`, or a test that never touches a real file.
+_FALLBACK_COLUMNS: tuple[str, ...] = (
+    "user_id", "name", "department", "salary", "performance_score", "hire_date", "notes",
 )
+
+
+def introspect_columns(db_path: Path = DB_PATH) -> tuple[str, ...]:
+    """Columns the agent may see, read from the database catalog.
+
+    The allowlist used to be written out by hand in three places -- here, the
+    `Column` enum the model is given, and the SQL guard's own set. Three copies
+    of one truth, each maintained separately, which is a drift waiting to
+    happen: add a column and the guard silently disagrees with the schema.
+
+    Deriving it from the catalog does not weaken anything. An allowlist is a
+    security control; *where it comes from* is not, so long as the source is
+    trusted and the model cannot influence it. This reads the catalog once, at
+    startup, through a privileged connection -- the same trust level that loads
+    the data in the first place -- and the model never touches it.
+
+    `TENANT_COLUMN` is excluded here rather than filtered later. Inside a
+    session there is exactly one tenant, so the column carries no information,
+    and leaving it out removes the word from the model's vocabulary entirely.
+    """
+    if not db_path.exists():
+        return _FALLBACK_COLUMNS
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(f"PRAGMA table_info({BASE_TABLE})").fetchall()
+    except sqlite3.DatabaseError:
+        return _FALLBACK_COLUMNS
+    finally:
+        conn.close()
+    found = tuple(r[1] for r in rows if r[1] != TENANT_COLUMN)
+    return found or _FALLBACK_COLUMNS
+
+
+def introspect_types(db_path: Path = DB_PATH) -> dict[str, str]:
+    """Declared SQL type per exposed column, for the schema shown to the model."""
+    if not db_path.exists():
+        return {}
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(f"PRAGMA table_info({BASE_TABLE})").fetchall()
+    except sqlite3.DatabaseError:
+        return {}
+    finally:
+        conn.close()
+    return {r[1]: (r[2] or "TEXT") for r in rows if r[1] != TENANT_COLUMN}
+
+
+#: Resolved once at import. Add a column to the table and it appears here, in
+#: the model's vocabulary and in the SQL guard together -- there is nothing to
+#: keep in step by hand.
+AGENT_COLUMNS: tuple[str, ...] = introspect_columns()
 
 #: Hard ceiling on rows returned to the agent from any single statement.
 MAX_ROWS = 500
@@ -362,16 +410,23 @@ class TenantDatabase:
 def schema_description() -> str:
     """The virtual schema shown to the model. Names only what it may query."""
     lines = [f"TABLE {AGENT_TABLE} (one row per employee in your organisation)"]
-    types = {
-        "user_id": "INTEGER, unique employee id",
-        "name": "TEXT, full name",
-        "department": "TEXT (the actual values for your organisation are listed below)",
-        "salary": "INTEGER, annual gross in EUR",
-        "performance_score": "REAL 1.0-5.0, may be NULL",
-        "hire_date": "TEXT, ISO date YYYY-MM-DD",
-        "notes": "TEXT free-form HR note, may be NULL",
+    # Hints where a declared SQL type is not the whole story. Anything without
+    # one falls back to the catalog's own type, so a new column documents
+    # itself rather than silently appearing as untyped.
+    hints = {
+        "user_id": "unique employee id",
+        "name": "full name",
+        "department": "the actual values for your organisation are listed below",
+        "salary": "annual gross in EUR",
+        "performance_score": "1.0-5.0, may be NULL",
+        "hire_date": "ISO date YYYY-MM-DD",
+        "notes": "free-form HR note, may be NULL",
     }
-    lines += [f"  {col:18} {types[col]}" for col in AGENT_COLUMNS]
+    declared = introspect_types()
+    for col in AGENT_COLUMNS:
+        kind = declared.get(col, "TEXT")
+        hint = hints.get(col)
+        lines.append(f"  {col:18} {kind}" + (f", {hint}" if hint else ""))
     return "\n".join(lines)
 
 
