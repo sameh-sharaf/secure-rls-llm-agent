@@ -233,10 +233,27 @@ def _compile_predicate(pred: Predicate) -> tuple[str, list[Any]]:
     return f"{col} {pred.op.value} ?", [pred.value]
 
 
+def _referenced_columns(spec: QuerySpec) -> set[str]:
+    """Every column the spec touches, not only the ones it projects.
+
+    Filters and ordering count. A predicate on a column the role may not see is
+    an inference channel -- `WHERE hidden > 100000` narrows the population
+    without ever returning the value.
+    """
+    names = {c.value for c in spec.select}
+    names |= {c.value for c in spec.group_by}
+    names |= {m.column.value for m in spec.metrics}
+    names |= {f.column.value for f in spec.filters}
+    if spec.order_by is not None:
+        names.add(spec.order_by.value)
+    return names
+
+
 def compile_spec(
     spec: QuerySpec,
     *,
     masked_columns: frozenset[str] = frozenset(),
+    hidden_columns: frozenset[str] = frozenset(),
     limit_override: int | None = None,
 ) -> CompiledQuery:
     """Turn a validated spec into parameterised SQL.
@@ -244,6 +261,10 @@ def compile_spec(
     `masked_columns` comes from the caller's role policy (layer 1). A masked
     column may still be aggregated -- an analyst can ask for the average salary
     in Engineering -- but may not be selected for a named individual.
+
+    `hidden_columns` is the stronger form from the same policy: the role may not
+    name the column at all, in any position. Checked first, because a hidden
+    column must not fall through to the more permissive aggregate rule below.
 
     `limit_override` raises the row cap above what a `QuerySpec` can express.
     It exists for one internal caller: the gateway's median path, which must
@@ -255,6 +276,16 @@ def compile_spec(
         raise SpecError("a query must select at least one column, metric or grouping")
 
     aggregate_only = bool(spec.metrics) and not spec.select
+
+    forbidden = _referenced_columns(spec) & hidden_columns
+    if forbidden:
+        raise tag(
+            SpecError(
+                f"your role may not access {', '.join(sorted(forbidden))}. "
+                f"Ask about the columns in the schema you were given"
+            ),
+            Layer.L1,
+        )
 
     for column in spec.select:
         if column.value in masked_columns:

@@ -19,6 +19,8 @@ import hmac
 from dataclasses import dataclass
 from enum import StrEnum
 
+from db import AGENT_COLUMNS
+
 # Demo-only. Real deployments delegate to an IdP and never see a password at
 # all; this exists so the demo can switch tenants in front of an audience.
 _SALT = b"secure-rls-demo-salt"
@@ -42,9 +44,20 @@ class Role(StrEnum):
 
 @dataclass(frozen=True)
 class ColumnPolicy:
-    """What a role may see, and at what granularity."""
+    """What a role may see, and at what granularity.
 
-    #: Columns the role may name at all.
+    Two tiers, and the difference matters. A *hidden* column does not exist as
+    far as the role is concerned -- it is absent from the schema the model is
+    shown, and naming it is refused outright. A *masked* column can be reasoned
+    about in aggregate but never read for an individual: an analyst may ask for
+    the average salary in Engineering and may not list salaries beside names.
+
+    Hiding is the blunter instrument and is the right one when a column should
+    not inform an answer at all. Masking is what you want when the column is
+    legitimately part of the analysis and only the granularity is the problem.
+    """
+
+    #: Columns the role may name at all. Anything outside this is hidden.
     visible: frozenset[str]
     #: May the role see an individual person's salary, or only aggregates?
     row_level_salary: bool
@@ -52,11 +65,27 @@ class ColumnPolicy:
     def masked_columns(self) -> frozenset[str]:
         return frozenset() if self.row_level_salary else frozenset({"salary"})
 
+    def hidden_columns(self) -> frozenset[str]:
+        """Everything the table has that this role may not name.
 
-_ALL_COLUMNS = frozenset(
-    {"user_id", "name", "department", "salary", "performance_score", "hire_date", "notes"}
-)
+        Derived by subtraction from the live column set rather than listed, so
+        a column added to the table is hidden by default from any role whose
+        `visible` set was written out explicitly. Fail closed: a new column
+        should have to be granted, not remembered.
+        """
+        return frozenset(AGENT_COLUMNS) - self.visible
 
+
+#: Every column the agent's table exposes. Derived from the catalog (ADR-0005)
+#: -- this was a hand-written seventh-column list, which is exactly the drift
+#: that refactor removed everywhere else.
+_ALL_COLUMNS = frozenset(AGENT_COLUMNS)
+
+#: Neither shipped role hides anything: the case study is about tenant
+#: isolation, and hiding columns by default would narrow the demo without
+#: demonstrating anything the mask does not. The mechanism is enforced and
+#: tested so that a role *can* hide a column -- see
+#: `tests/test_column_policy.py`.
 ROLE_POLICY: dict[Role, ColumnPolicy] = {
     # HR administrators see individual compensation.
     Role.HR_ADMIN: ColumnPolicy(visible=_ALL_COLUMNS, row_level_salary=True),

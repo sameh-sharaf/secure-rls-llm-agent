@@ -428,7 +428,7 @@ def render_internals(session) -> None:
     st.code(tool_schemas(session.tools), language="json")
 
     st.markdown("#### The schema the model is given")
-    st.code(schema_description(), language="text")
+    st.code(schema_description(session.principal.policy.hidden_columns()), language="text")
     st.caption(
         "Note the absence of `tenant_id`: inside a session there is only one "
         "organisation, so the column carries no information and is not projected."

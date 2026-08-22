@@ -88,9 +88,10 @@ class QueryGateway:
             return self._run_percentile(spec, tool=tool)
         started = time.perf_counter()
         masked = self.principal.policy.masked_columns()
+        hidden = self.principal.policy.hidden_columns()
 
         try:
-            compiled = compile_spec(spec, masked_columns=masked)
+            compiled = compile_spec(spec, masked_columns=masked, hidden_columns=hidden)
             if compiled.aggregate_only and not spec.group_by:
                 self._require_cohort(spec)
             rows = self._db.execute(compiled.sql, compiled.params)
@@ -119,9 +120,12 @@ class QueryGateway:
         """Escape hatch: validate and rewrite model-written SQL, then execute."""
         started = time.perf_counter()
         masked = self.principal.policy.masked_columns()
+        hidden = self.principal.policy.hidden_columns()
 
         try:
-            guarded: GuardResult = guard_sql(sql, masked_columns=masked)
+            guarded: GuardResult = guard_sql(
+                sql, masked_columns=masked, hidden_columns=hidden
+            )
             rows = self._db.execute(guarded.sql, [])
             if guarded.aggregate_only:
                 self._require_cohort_for_sql(guarded.sql)
@@ -165,7 +169,11 @@ class QueryGateway:
             # of 500 rows is simply a wrong number. Exact up to MAX_ROWS; beyond
             # that a warehouse percentile function is the right answer, not a
             # bigger fetch.
-            compiled = compile_spec(fetch, limit_override=MAX_ROWS)
+            compiled = compile_spec(
+                fetch,
+                hidden_columns=self.principal.policy.hidden_columns(),
+                limit_override=MAX_ROWS,
+            )
             rows = self._db.execute(compiled.sql, compiled.params)
         except (SpecError, SecurityError) as exc:
             self._audit(tool, spec.model_dump_json(), None, 0, "n/a", f"rejected: {exc}", started)
@@ -311,8 +319,12 @@ class QueryGateway:
 
         Safe to include: a dimension, not a measure, tenant-scoped by the same
         bound connection as everything else, and reachable by either role
-        through an ordinary DISTINCT.
+        through an ordinary DISTINCT -- unless the role cannot see the column at
+        all, in which case this is another prompt side channel and returns
+        nothing. Invariant 5b: the prompt is an output.
         """
+        if "department" in self.principal.policy.hidden_columns():
+            return []
         rows = self._db.execute("SELECT DISTINCT department FROM employees ORDER BY department")
         return [r["department"] for r in rows]
 
@@ -335,13 +347,18 @@ class QueryGateway:
         in the one method every caller goes through, rather than in each caller.
         """
         masked = self.principal.policy.masked_columns()
+        hidden = self.principal.policy.hidden_columns()
         rows = self._db.sample(n)
-        if not masked:
+        if not masked and not hidden:
             return rows
+        # Masked columns keep their key and lose their value; hidden ones lose
+        # the key too. A placeholder would still tell the model the column is
+        # there, which is the thing hiding is for.
         return [
             {
                 key: (self.MASKED_PLACEHOLDER if key in masked else value)
                 for key, value in row.items()
+                if key not in hidden
             }
             for row in rows
         ]

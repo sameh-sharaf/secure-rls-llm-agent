@@ -96,7 +96,13 @@ class _Patches:
 
         self._saved["guard_sql"] = gw_module.guard_sql
 
-        def passthrough(sql: str, *, masked_columns=frozenset()):
+        # The signature mirrors `guard_sql` explicitly rather than absorbing
+        # **kwargs. A catch-all here would let a new policy argument be added to
+        # the real guard and silently ignored by the arm that is supposed to
+        # stand in for it -- the ablation harness has already reported a
+        # confident 0.00% once by measuring nothing (see
+        # tests/test_ablation_harness.py). Better that it fails loudly.
+        def passthrough(sql: str, *, masked_columns=frozenset(), hidden_columns=frozenset()):
             return sql_guard.GuardResult(sql=sql, original_sql=sql, rewrites=[])
 
         gw_module.guard_sql = passthrough

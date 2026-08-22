@@ -132,6 +132,28 @@ def _check_functions(tree: exp.Expression) -> None:
             _fail(f"function {name}() is not permitted")
 
 
+def _check_hidden_columns(tree: exp.Expression, hidden: frozenset[str]) -> None:
+    """A hidden column may not be named anywhere, in any position.
+
+    Stronger and simpler than the masking rule below: no aggregate exemption,
+    no position exemption, and it runs first so a hidden column cannot reach
+    the more permissive rule. A predicate counts as naming it -- `WHERE hidden
+    > 100000` never returns the value and still narrows the population.
+    """
+    if not hidden:
+        return
+    for column in tree.find_all(exp.Column):
+        name = (column.name or "").lower()
+        if name in hidden:
+            raise tag(
+                SqlRejected(
+                    f"your role may not access {name}. "
+                    f"Ask about the columns in the schema you were given"
+                ),
+                Layer.L1,  # the role decides; layer 3 only enforces the decision
+            )
+
+
 def _check_masked_columns(tree: exp.Expression, masked: frozenset[str]) -> bool:
     """Enforce the role's column policy on model-written SQL.
 
@@ -222,7 +244,12 @@ def _apply_k_anonymity(select: exp.Select, rewrites: list[str]) -> None:
     rewrites.append(f"required COUNT(*) >= {MIN_COHORT_SIZE} per group (k-anonymity)")
 
 
-def guard_sql(sql: str, *, masked_columns: frozenset[str] = frozenset()) -> GuardResult:
+def guard_sql(
+    sql: str,
+    *,
+    masked_columns: frozenset[str] = frozenset(),
+    hidden_columns: frozenset[str] = frozenset(),
+) -> GuardResult:
     """Validate and rewrite a model-written statement, or raise `SqlRejected`."""
     if not sql or not sql.strip():
         _fail("empty statement")
@@ -244,6 +271,7 @@ def guard_sql(sql: str, *, masked_columns: frozenset[str] = frozenset()) -> Guar
     _check_tables(tree)
     _check_columns(tree)
     _check_functions(tree)
+    _check_hidden_columns(tree, hidden_columns)
     _check_masked_columns(tree, masked_columns)
 
     rewrites: list[str] = []

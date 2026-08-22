@@ -76,6 +76,44 @@ for the part that does the defending.
 5. Install the authorizer *before* returning the connection — any gap is a
    window in which the base table is readable.
 
+## The role column policy
+
+The tenant boundary is structural; the role policy is the one place this system
+holds a *declarative* rule. It lives in `ROLE_POLICY` and has two tiers:
+
+| tier | meaning | enforced where |
+|---|---|---|
+| **masked** | may be aggregated, may not be read for an individual | `compile_spec`, `guard_sql`, `sample_rows` |
+| **hidden** | may not be named at all, and is absent from the schema the model is shown | same three, plus `schema_description` and `departments()` |
+
+Masking is right when a column is legitimately part of the analysis and only
+the *granularity* is the problem — an analyst may ask for the average salary in
+Engineering and may not list salaries beside names. Hiding is right when the
+column should not inform an answer at all.
+
+`hidden_columns()` is derived by subtracting `visible` from the live catalog
+column set, so a column added to the table is hidden by default from any role
+whose `visible` set was written out explicitly. A new column has to be granted
+rather than remembered.
+
+Three details that are load-bearing:
+
+- **The gateway is the only consumer.** Every path that reveals a value —
+  query results, the system prompt's sample rows, the UI — reads the policy in
+  `QueryGateway` and nowhere else. Invariant 5b exists because the mask was
+  once applied on the query path and bypassed by the prompt built alongside it.
+- **Hidden is checked before masked.** A hidden column must not fall through to
+  the more permissive aggregate rule, the same ordering that `MIN`/`MAX` needed.
+- **Hidden columns are dropped, not placeholdered.** A `<restricted>` marker in
+  a sample row would still tell the model the column exists, which is the thing
+  hiding is for.
+
+Neither shipped role hides anything — the case study is about tenant isolation,
+and hiding columns by default would narrow the demo without showing anything
+the mask does not. `tests/test_column_policy.py` constructs a restricted policy
+so the mechanism is exercised anyway; an unenforced field and an untested one
+fail the same way.
+
 ## Data-flow invariants
 
 | Invariant | Where enforced | Where tested |

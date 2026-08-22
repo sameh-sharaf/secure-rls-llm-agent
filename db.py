@@ -437,8 +437,14 @@ class TenantDatabase:
         self.close()
 
 
-def schema_description() -> str:
-    """The virtual schema shown to the model. Names only what it may query."""
+def schema_description(hidden: frozenset[str] = frozenset()) -> str:
+    """The virtual schema shown to the model. Names only what it may query.
+
+    `hidden` comes from the caller's role policy. A column the role may not
+    name is omitted rather than annotated: telling the model a column exists
+    and is forbidden invites it to ask, and the refusal that follows reads to a
+    user as the system being broken.
+    """
     lines = [f"TABLE {AGENT_TABLE} (one row per employee in your organisation)"]
     # Hints where a declared SQL type is not the whole story. Anything without
     # one falls back to the catalog's own type, so a new column documents
@@ -453,7 +459,7 @@ def schema_description() -> str:
         "notes": "free-form HR note, may be NULL",
     }
     declared = introspect_types()
-    for col in AGENT_COLUMNS:
+    for col in (c for c in AGENT_COLUMNS if c not in hidden):
         kind = declared.get(col, "TEXT")
         hint = hints.get(col)
         lines.append(f"  {col:18} {kind}" + (f", {hint}" if hint else ""))

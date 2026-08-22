@@ -199,7 +199,7 @@ def system_prompt(session: Session, *, include_policy: bool = True) -> str:
         f"Your organisation has {session.gateway.total_rows()} employees.\n"
         f"Role: {session.principal.role.value} "
         f"({'may see individual salaries' if session.principal.policy.row_level_salary else 'may see salary statistics but not an individual salary'}).\n\n"
-        f"SCHEMA\n{schema_description()}\n\n"
+        f"SCHEMA\n{schema_description(session.principal.policy.hidden_columns())}\n\n"
         # The real list, not an example. A hardcoded "e.g." list in the schema
         # omitted Legal and left it ambiguous whether it was exhaustive, so a
         # model asked for "the highest salary in HR" -- a department that does
