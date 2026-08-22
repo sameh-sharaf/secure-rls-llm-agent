@@ -573,9 +573,48 @@ def test_a_policy_refusal_still_routes_to_retry() -> None:
     state = {
         "rounds": 1,
         "attempts": 0,
-        "trace": [{"kind": "tool", "status": "refused"}],
+        "round_refusals": 1,
     }
     assert SecureAgent._after_guard(state) == "retry"
+
+
+def test_a_revised_refusal_does_not_keep_retrying() -> None:
+    """The retry branch reads *this* round, not the whole turn.
+
+    `trace` accumulates for the length of the turn, so a refusal in round one
+    kept satisfying the retry condition in rounds two and three even after the
+    revised call had succeeded. Asked "how many employees in Operations?" the
+    model sent `filters` as a bare object, was refused, corrected itself, and
+    answered -- and the graph then spent the rest of the round budget revising
+    a refusal that no longer existed, stitching two answers to the same
+    question together.
+    """
+    state = {
+        "rounds": 2,
+        "attempts": 1,
+        # Round one was refused and is still in the trace, as it should be --
+        # the trace is the record of the turn.
+        "trace": [
+            {"kind": "tool", "status": "refused"},
+            {"kind": "tool", "status": "ok"},
+        ],
+        # ...but this round refused nothing.
+        "round_refusals": 0,
+    }
+    assert SecureAgent._after_guard(state) == "plan"
+
+
+def test_the_round_refusal_counter_does_not_survive_a_turn(agent: SecureAgent) -> None:
+    """`route` clears it, so one turn's refusal cannot retry the next question.
+
+    Everything per-turn is reset in `route` for the reason `refusal_reason`
+    was: the checkpointer that provides multi-turn memory persists graph state,
+    so a field nobody clears is a field that comes back.
+    """
+    fresh = agent._route({"question": "how many people are in Sales?", "messages": []})
+    assert fresh["round_refusals"] == 0
+    assert fresh["rounds"] == 0
+    assert fresh["attempts"] == 0
 
 
 def test_every_path_out_of_guard_is_declared(agent: SecureAgent) -> None:
@@ -889,6 +928,9 @@ def _refused_turn(question: str, args: dict) -> dict:
         "turn_start": 0,
         "attempts": 0,
         "trace": [{"kind": "tool", "status": "refused"}],
+        # This round refused; `_after_guard` reads this rather than the trace,
+        # so that a refusal already revised in an earlier round stops counting.
+        "round_refusals": 1,
         "messages": [
             HumanMessage(content=question),
             AIMessage(content="", tool_calls=[call]),

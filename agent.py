@@ -155,6 +155,9 @@ class AgentState(TypedDict, total=False):
     #: Completed tool rounds this turn. Reset in `route`, like everything else
     #: that must not survive into the next question.
     rounds: int
+    #: Tool refusals in the most recent round only. Deliberately reducer-free:
+    #: `_after_guard` must not see a refusal a previous round already revised.
+    round_refusals: int
     rejections: Annotated[list[str], merge_reasons]
     trace: Annotated[list[dict], merge_steps]
     #: Index into `messages` where the current turn begins.
@@ -388,6 +391,7 @@ class SecureAgent:
             # reset per-turn state.
             "refusal_reason": "",
             "rounds": 0,
+            "round_refusals": 0,
             "turn_start": turn_start,
             "rejections": ["__reset__"],
             "trace": fresh + [step("route", "In scope", status="ok")],
@@ -517,6 +521,8 @@ class SecureAgent:
             "messages": outputs,
             "trace": trace,
             "rejections": rejections,
+            #: Refusals in this round alone -- see `_after_guard`.
+            "round_refusals": len(rejections),
             "rounds": state.get("rounds", 0) + 1,
         }
 
@@ -745,8 +751,14 @@ class SecureAgent:
         """
         if state.get("refusal_reason"):
             return "refuse"
-        trace = state.get("trace", [])
-        refused = [s for s in trace if s.get("kind") == "tool" and s.get("status") == "refused"]
+        # Refusals from *this* round only. `trace` accumulates across the whole
+        # turn, so scanning it kept re-firing the retry branch on a refusal that
+        # had already been revised and answered: a turn whose first call was
+        # refused went to `retry` again after the second and third calls both
+        # succeeded, spending the whole round budget and stitching two answers
+        # to the same question together. `round_refusals` is a plain state
+        # field, so LangGraph replaces it on every `tools` return.
+        refused = state.get("round_refusals", 0)
         attempts = state.get("attempts", 0)
         if refused:
             # Nothing to revise when the user typed the refused thing themselves.
@@ -961,6 +973,10 @@ def _explain_validation(exc: Exception, tool_name: str, tool: Any) -> str:
     return "; ".join(parts) + f". Parameters of {tool_name}: {fields}."
 
 
+#: Marker `_run_tools` puts on a Pydantic failure, as opposed to a policy one.
+#: The two are both "REFUSED" to the model and mean different things to a user.
+_ARGUMENT_ERROR = "(invalid arguments)"
+
 _REFUSAL_PREFIX = re.compile(r"^(REFUSED|BLOCKED)\s*(\[[^\]]*\])?\s*(\([^)]*\))?:\s*", re.I)
 _LAYER_IN_MESSAGE = re.compile(r"^(?:REFUSED|BLOCKED)\s*\[([^\]]+)\]", re.I)
 
@@ -1067,7 +1083,17 @@ def _undisclosed_refusal(state: AgentState, answer: str) -> str:
     reasons = [
         _humanise_refusal(str(m.content))
         for m in messages
-        if isinstance(m, ToolMessage) and str(m.content or "").startswith(("REFUSED", "BLOCKED"))
+        if isinstance(m, ToolMessage)
+        and str(m.content or "").startswith(("REFUSED", "BLOCKED"))
+        # An argument-shape error is not a policy decision, so there is nothing
+        # to disclose once a later call has answered the question. Asked "how
+        # many employees in Operations?", the model sent `filters` as a bare
+        # object, corrected itself, and returned the right number -- and this
+        # function put "`filters`: Input should be a valid list" above it. The
+        # user reads that as a refusal, and it means only that the model typed
+        # the arguments wrong once. Policy refusals -- role, tenant, cohort --
+        # still surface, because those the user genuinely needs told about.
+        and _ARGUMENT_ERROR not in str(m.content)
     ]
     reasons = [r for r in reasons if r]
     if not reasons:

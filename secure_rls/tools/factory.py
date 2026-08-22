@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from secure_rls.security.gateway import CohortTooSmall, QueryGateway, QueryResult
 from secure_rls.security.layers import layer_of
@@ -97,6 +97,28 @@ class _Base(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _one_or_many(value: Any) -> Any:
+    """Accept a bare value where the schema asks for a list.
+
+    Small models routinely send `filters={"column": ...}` or
+    `select="department"` when they mean a one-element list, and Pydantic
+    rejects the shape. Asked "how many employees in Operations?", qwen2.5 sent
+    exactly that: the call was refused, the retry recovered, and the user was
+    shown a validation error sitting above the correct answer.
+
+    Coercing here is not a relaxation of the tool contract. It widens the
+    accepted *shape*, never the accepted vocabulary: every element still passes
+    through `FilterArg` or the `Column` enum with `extra="forbid"`, so a field
+    the model invents is still a validation error and there is still no way to
+    name a tenant. The alternative -- spending a retry on a bracket -- costs two
+    model calls and puts a Pydantic message in front of a user for a mistake
+    the server can simply read correctly.
+    """
+    if value is None or isinstance(value, list):
+        return value
+    return [value]
+
+
 class FilterArg(_Base):
     column: Column = Field(description="Column to filter on")
     op: Operator = Field(description="Comparison operator")
@@ -148,6 +170,10 @@ class QueryEmployeesArgs(_Base):
             "group and you intend to list its members; aggregates ignore it."
         ),
     )
+
+    _accept_a_bare_value = field_validator(
+        "select", "metrics", "filters", "group_by", mode="before"
+    )(_one_or_many)
 
 
 class RunSqlArgs(_Base):
@@ -227,6 +253,8 @@ class PlotArgs(_Base):
         ),
     )
     title: str | None = Field(default=None, description="Optional chart title")
+
+    _accept_a_bare_series = field_validator("series", mode="before")(_one_or_many)
 
 
 class AnomalyArgs(_Base):

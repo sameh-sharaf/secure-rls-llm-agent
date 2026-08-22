@@ -16,9 +16,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pydantic import ValidationError  # noqa: E402
+
 from secure_rls.security.gateway import QueryGateway  # noqa: E402
 from secure_rls.security.principal import authenticate  # noqa: E402
-from secure_rls.tools.factory import ToolContext, build_tools, tool_schemas  # noqa: E402
+from secure_rls.tools.factory import (  # noqa: E402
+    PlotArgs,
+    QueryEmployeesArgs,
+    ToolContext,
+    build_tools,
+    tool_schemas,
+)
 
 #: Anything that smells like a way to name an organisation.
 FORBIDDEN_KEYS = ("tenant", "org", "organisation", "organization", "company", "customer", "client")
@@ -213,3 +221,53 @@ def test_chart_schema_still_has_no_tenant_parameter(context: ToolContext) -> Non
     blob = json.dumps(schema.model_json_schema()).lower()
     for forbidden in ("tenant", "acme", "beta", "gamma", "employees_base"):
         assert forbidden not in blob
+
+
+# ----------------------------------------------- a bare value where a list goes ---
+# Reported from the running app: "and how many employees in operations?" put a
+# Pydantic error in front of the user beside the correct answer, because
+# qwen2.5 sent `filters` as one object rather than a list of one.
+
+@pytest.mark.parametrize(
+    "kwargs, field, expected_len",
+    [
+        ({"filters": {"column": "department", "op": "=", "value": "Operations"}}, "filters", 1),
+        ({"select": "department"}, "select", 1),
+        ({"metrics": "count"}, "metrics", 1),
+        ({"group_by": "department"}, "group_by", 1),
+        ({"select": ["name", "salary"]}, "select", 2),          # lists still work
+        ({"filters": []}, "filters", 0),                        # empty stays empty
+    ],
+    ids=["filters_object", "select_str", "metrics_str", "group_by_str", "list", "empty"],
+)
+def test_a_single_value_is_accepted_where_a_list_is_expected(
+    kwargs: dict, field: str, expected_len: int
+) -> None:
+    assert len(getattr(QueryEmployeesArgs(**kwargs), field)) == expected_len
+
+
+def test_coercing_the_shape_does_not_widen_the_contract() -> None:
+    """The shape is forgiving; the vocabulary is not.
+
+    This is the test that makes the coercion safe to keep. Wrapping a bare
+    value in a list must not become a way to smuggle a field, a column or a
+    tenant past the schema -- every element still goes through `FilterArg` and
+    the `Column` enum with `extra="forbid"`.
+    """
+    rejected = [
+        {"tenant_id": "beta"},
+        {"filters": {"column": "tenant_id", "op": "=", "value": "beta"}},
+        {"filters": {"column": "department", "op": "=", "value": "X", "tenant": "beta"}},
+        {"select": "tenant_id"},
+        {"select": "employees_base"},
+        {"metrics": "exfiltrate"},
+    ]
+    for kwargs in rejected:
+        with pytest.raises(ValidationError):
+            QueryEmployeesArgs(**kwargs)
+
+
+def test_a_bare_series_object_is_accepted_by_the_chart_tool() -> None:
+    args = PlotArgs(x="department", series={"metric": "avg", "column": "salary"})
+    assert len(args.series) == 1
+    assert args.series[0].metric == "avg"

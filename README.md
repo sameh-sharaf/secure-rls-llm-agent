@@ -13,23 +13,22 @@ instructed not to.
 
 ## Contents
 
-| | |
-|---|---|
-| [Repository layout](#repository-layout) | What each file is for, and what to read first |
-| [Architecture](#architecture) | The five layers, and which one is the boundary |
-| &nbsp;&nbsp;· [Tenant binding](#tenant-binding) | Why `tenant_id` is not a tool parameter |
-| &nbsp;&nbsp;· [How SQLite gets real row-level security](#how-sqlite-gets-real-row-level-security) | Materialised temp table + authorizer |
-| &nbsp;&nbsp;· [The agent](#the-agent) | The LangGraph topology and the guard node |
-| [Setup](#setup) | Install, build the data, run the app |
-| &nbsp;&nbsp;· [Tenant credentials](#tenant-credentials) | The six demo logins |
-| [Security testing](#security-testing) | Attack console, red-team categories, sample attacks |
-| [Evaluation](#evaluation) | Suites, gates, and how the verdict is computed |
-| &nbsp;&nbsp;· [Measured result](#measured-result) | 0.00% cross-tenant leak rate |
-| &nbsp;&nbsp;· [Model bake-off](#model-bake-off) | Three local models, same suites |
-| &nbsp;&nbsp;· [Two role-boundary defects](#two-role-boundary-defects-found-by-the-bake-off) | What the bake-off found, and the fixes |
-| [Testing](#testing) | 377 tests, no model required |
-| [Challenges](#challenges) | The problems worth writing down |
-| [Time spent](#time-spent) | ~30 hours, by phase |
+- [Repository layout](#repository-layout)
+- [Architecture](#architecture)
+  - [Tenant binding](#tenant-binding)
+  - [How SQLite gets real row-level security](#how-sqlite-gets-real-row-level-security)
+  - [The agent](#the-agent)
+- [Setup](#setup)
+  - [Tenant credentials](#tenant-credentials)
+- [Security testing](#security-testing)
+- [Evaluation](#evaluation)
+  - [Measured result](#measured-result)
+  - [Model bake-off](#model-bake-off)
+  - [Two role-boundary defects found by the bake-off](#two-role-boundary-defects-found-by-the-bake-off)
+  - [How the verdict is computed](#how-the-verdict-is-computed)
+- [Testing](#testing)
+- [Challenges](#challenges)
+- [Time spent](#time-spent)
 
 ---
 
@@ -352,7 +351,7 @@ python -m evals.report evals/results/*.json
 ## Testing
 
 ```bash
-python -m pytest tests/ -q      # 377 tests, no model required
+python -m pytest tests/ -q      # 387 tests, no model required
 ```
 
 `tests/test_boundary.py` is the central one: a fixed corpus of smuggling
