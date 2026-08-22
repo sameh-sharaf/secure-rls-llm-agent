@@ -563,17 +563,6 @@ def render_security(session) -> None:
         else:
             st.success("Answered within your own organisation. No leak.")
 
-    st.markdown("#### Audit log")
-    rows = session.audit.rows()
-    if rows:
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-        st.caption(
-            f"Hash chain verified: {session.audit.verify()} — "
-            f"{len(rows)} entries, each carrying the digest of its predecessor."
-        )
-    else:
-        st.caption("No data access yet in this session.")
-
 
 # --------------------------------------------------------------- transparency
 
