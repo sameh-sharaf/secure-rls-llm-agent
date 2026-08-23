@@ -363,6 +363,7 @@ def _trace_layers(
     rows: int | None = None,
     path: str | None = None,
     verdict: str | None = None,
+    audit_from: int | None = None,
 ) -> None:
     """Record what each layer saw and produced for one tool call.
 
@@ -379,6 +380,25 @@ def _trace_layers(
         "refused_by": refusal_layer(exc) if exc is not None else None,
         "reason": str(exc) if exc is not None else None,
     }
+    # The audit entry this call produced, if it produced one. Compared by
+    # sequence number rather than taking the last entry blindly: the retrieval
+    # path does not write to the audit log, so `entries()[-1]` there would
+    # attach some earlier call's record to this one.
+    if audit_from is not None:
+        written = context.gateway.audit.entries()[audit_from:]
+        if written:
+            last = written[-1]
+            entry["l5_audit"] = {
+                "seq": last.seq,
+                "tool": last.tool,
+                "rows_returned": last.rows_returned,
+                "outcome": last.outcome,
+                "latency_ms": last.latency_ms,
+                "prev_hash": last.prev_hash,
+                "entry_hash": last.entry_hash,
+                "chain_ok": context.gateway.audit.verify(),
+            }
+
     if rows is not None:
         # A path that reaches data without compiling SQL -- retrieval. The
         # layers still apply, they just are not a query, and saying so beats
@@ -472,14 +492,17 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
             limit=args.limit,
         )
         summary = spec.model_dump_json(exclude_defaults=True)
+        audit_from = len(gateway.audit.entries())
         try:
             result = gateway.run_spec(spec)
         except Exception as exc:
             context.rejections.append(str(exc))
-            _trace_layers(context, "query_employees", kwargs, summary, exc=exc)
+            _trace_layers(context, "query_employees", kwargs, summary, exc=exc,
+                          audit_from=audit_from)
             return _explain_refusal(exc)
 
-        _trace_layers(context, "query_employees", kwargs, summary, result=result)
+        _trace_layers(context, "query_employees", kwargs, summary, result=result,
+                      audit_from=audit_from)
         context.artifacts.append(
             Artifact(
                 kind="table",
@@ -494,14 +517,15 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
     # -- SQL escape hatch --------------------------------------------------
     def run_sql(sql: str) -> str:
         raw = {"sql": sql}
+        audit_from = len(gateway.audit.entries())
         try:
             result = gateway.run_sql(sql)
         except Exception as exc:
             context.rejections.append(str(exc))
-            _trace_layers(context, "run_sql", raw, sql, exc=exc)
+            _trace_layers(context, "run_sql", raw, sql, exc=exc, audit_from=audit_from)
             return _explain_refusal(exc)
 
-        _trace_layers(context, "run_sql", raw, sql, result=result)
+        _trace_layers(context, "run_sql", raw, sql, result=result, audit_from=audit_from)
         context.artifacts.append(
             Artifact(
                 kind="table",

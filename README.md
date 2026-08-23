@@ -37,32 +37,14 @@ instructed not to.
 
 Five layers. Layer 4 is the boundary; the rest are defence in depth.
 
-```
-model                       writes JSON (or SQL)   <- not a layer, not trusted
-------------------------------------------------------------------------------
-L1  security/principal.py    who you are, and what your role may see
-L2  tools/factory.py         the schema that constrains what the model can say
-L3  security/spec.py         compiles that JSON into SQL
-    security/sql_guard.py    ...or validates SQL the model wrote itself
-    security/gateway.py      every read goes through this one object
-L4  db.py                    a connection holding one tenant's rows, nothing else
-L5  security/output_guard.py checks the rows on the way out
-    security/audit.py        records what happened, hash-chained
-```
-
-Two things in that sketch are easy to read past. **The model is outside all
-five layers** -- it writes the JSON, but L2 is the wall that JSON hits, not the
-step that produces it. And **L4 is not "a database"**: an ordinary connection
-would be no protection at all. It is a connection that contains only your rows,
-which is why the queries below carry no tenant filter and do not need one.
-
-| | Layer | What it does |
-|---|---|---|
-| **L1** | Identity binding (`security/principal.py`) | `Principal` built at login from the server-side session. Never a tool argument, never in a prompt as something rewritable, never round-tripped through the browser. |
-| **L2** | Tool contract (`tools/factory.py`) | Tools are closures over a gateway built from the principal. **No tool takes a tenant parameter.** Pydantic schemas set `extra="forbid"`. |
-| **L3** | Query gateway (`security/spec.py`, `sql_guard.py`) | Typed specs compile to parameterised SQL. Model-written SQL is validated on the sqlglot AST and rewritten for row limits. A k-anonymity floor is implemented and off by default. |
-| **L4** | **Database enforcement (`db.py`)** | **A private per-session database holding only this tenant's rows — the source file is detached, so nothing else exists to name — plus an authorizer denying `employees_base` unconditionally.** |
-| **L5** | Output guard + audit (`security/output_guard.py`, `audit.py`) | Verifies every result against a *privileged* id set, scans for foreign canaries, raises rather than filters, hash-chains the audit log. |
+| | Layer | Files | In one line | What it actually does |
+|---|---|---|---|---|
+| | *the model* | — | writes JSON, or SQL | **Not a layer, and not trusted.** It is outside all five: it produces the request, and L2 is the wall that request hits rather than the step that makes it. |
+| **L1** | Identity & role | `security/principal.py` | who you are, and what your role may see | `Principal` built at login from the server-side session. Never a tool argument, never in a prompt as something rewritable, never round-tripped through the browser. Also holds the role's column policy. |
+| **L2** | Tool contract | `tools/factory.py` | the schema that constrains what the model can say | Tools are closures over a gateway built from the principal. **No tool takes a tenant parameter.** Pydantic schemas set `extra="forbid"`, so an invented field is an error rather than an ignored key. |
+| **L3** | Query gateway | `security/gateway.py`<br>`security/spec.py`<br>`security/sql_guard.py` | compiles the JSON into SQL, or validates SQL the model wrote | Typed specs compile to parameterised SQL; model-written SQL is validated on the sqlglot AST, rewritten for row limits and regenerated from the tree. Every read goes through the gateway — tools never hold a connection. A k-anonymity floor is implemented and off by default. |
+| **L4** | **Database boundary** | `db.py` | a connection holding one tenant's rows, nothing else | **Not "a database"** — an ordinary connection would be no protection at all. A private per-session database holding only this tenant's rows, with the source file detached so nothing else exists to name, plus an authorizer denying `employees_base` unconditionally. This is why nothing downstream carries a tenant filter, and why it does not need one. |
+| **L5** | Output guard & audit | `security/output_guard.py`<br>`security/audit.py` | checks the rows on the way out, and records it | Verifies every result against a *privileged* id set computed independently of the filter that produced it, scans for foreign canaries, raises rather than filters, and hash-chains the audit log. |
 
 L1 and L2 decide *who* is asking and remove the model's ability to say
 otherwise. L3, L4 and L5 are the layers a malformed query has to get past.

@@ -593,6 +593,36 @@ def render_security(session) -> None:
     render_layer_lab(session)
 
 
+def _render_audit(entry: dict | None) -> None:
+    """The audit record this call wrote, shown beside the guard verdict.
+
+    A running table of every query used to live on this tab and was removed:
+    it competed for attention with the thing the tab is for. Scoped to the
+    request you just ran, it stops competing and starts explaining -- and it
+    is the right place for it, because the audit entry is written by layer 5
+    immediately after the verdict it sits under.
+
+    A refused call is recorded too, which is the more interesting half: the
+    log shows what was attempted, not only what succeeded.
+    """
+    if not entry:
+        st.caption("L5 · audit — no entry (this path does not write to the log)")
+        return
+    st.caption("L5 · audit — the record this call wrote")
+    chain = "verified" if entry.get("chain_ok") else "BROKEN"
+    lines = [
+        f"seq        {entry['seq']}",
+        f"tool       {entry['tool']}",
+        f"rows       {entry['rows_returned']}",
+        f"outcome    {entry['outcome']}",
+        f"latency    {entry['latency_ms']} ms",
+        f"prev_hash  {entry['prev_hash'][:32]}...",
+        f"entry_hash {entry['entry_hash'][:32]}...",
+        f"chain      {chain}",
+    ]
+    st.code("\n".join(lines), language="text")
+
+
 def render_layer_trace(session, reply=None) -> None:
     """What each layer received and produced, for the calls this turn made.
 
@@ -637,7 +667,8 @@ def render_layer_trace(session, reply=None) -> None:
 
             if t.get("refused_by"):
                 st.error(f"Refused by **{t['refused_by']}** — {t.get('reason', '')}")
-                st.caption("Nothing downstream ran, so there is nothing further to show.")
+                st.caption("Nothing downstream ran, so there is no SQL and no rows.")
+                _render_audit(t.get("l5_audit"))
                 continue
 
             st.caption("L3 · query gateway — out: parameterised SQL")
@@ -652,6 +683,7 @@ def render_layer_trace(session, reply=None) -> None:
 
             st.caption("L5 · output guard — verdict")
             st.code(t.get("l5_verdict") or "n/a", language="text")
+            _render_audit(t.get("l5_audit"))
 
 
 
