@@ -490,110 +490,76 @@ Each is cited from the code at the line it explains.
 | [0005](docs/adr/0005-schema-introspection.md) | Derive the column allowlist from the catalog, not from hand-written lists | Three copies of one truth existed and nothing kept them in step |
 | [0006](docs/adr/0006-detach-the-source-database.md) | The agent's connection is a private database, not the data file | SQLite consults the authorizer for a join written with `ON` and not for one written with `USING` |
 
-Three of these exist because a first attempt was wrong.
-
 ---
 
 ## Challenges
 
-**The obvious SQLite design has a real bypass.** The natural approach is a temp
-*view* over the base table, with the authorizer allowing base-table reads when
-SQLite reports the read as coming from that view (the callback's `source`
-argument). SQLite sets `source` to the name of the **CTE** performing the read,
-so `WITH employees AS (SELECT * FROM employees_base) SELECT * FROM employees`
-impersonates the view and returns every tenant. Every other smuggling variant
-was correctly blocked, which is what made it dangerous — the design looks like
-it works. Fixed by materialising a temp *table* and denying the base table with
-no exceptions at all. Kept as a named regression test. (ADR-0002)
+- **A temp view over the base table has a real bypass.** SQLite reports a
+  *CTE's* name in the authorizer's `source` argument, so
+  `WITH employees AS (SELECT * FROM employees_base) SELECT * FROM employees`
+  impersonates the view and returns every tenant. Every other smuggling variant
+  was blocked, so the design looked correct. Fixed by materialising a temp
+  *table* and denying the base table with no exceptions. Kept as a named
+  regression test. (ADR-0002)
 
-**Materialising per session trades memory for the guarantee.** The boundary
-works by copying the tenant's rows into a private in-memory database, so the
-cost of "other tenants' rows are absent" is one copy per signed-in session --
-about 500 rows here, and unworkable at five million. It is also a snapshot: a
-write to the source is not seen until the next login. Both costs are real and
-both disappear on a platform with native RLS, where the engine applies the
-filter without copying -- Postgres policies, Snowflake row access policies,
-Unity Catalog row filters. ADR-0004 sketches the Postgres profile. At this
-scale the copy is the right trade; at production scale the right move is to
-stop emulating row-level security and use the engine's own.
+- **Materialising per session trades memory for the guarantee.** One copy of the
+  tenant's rows per signed-in session — fine at 500 rows, unworkable at five
+  million — and a snapshot, so writes are not seen until the next login. Both
+  costs disappear on a platform with native RLS. (ADR-0004)
 
-**A default can answer the wrong question confidently.** `metric_column` — the
-column an aggregate applies to — defaulted to `salary` whenever the model left
-it out. Asked for the average performance score by department, a model that
-named the metric and forgot the column got `AVG(salary)`: correctly computed,
-correctly scoped to the tenant, and not the question asked. The only thing
-standing between that and a confident wrong number was the result column being
-named `avg_salary`, which is a naming convention doing a validator's job. The
-field is now resolved or refused — inferred from `select` when that names
-exactly one numeric column, and otherwise a validation error that the existing
-retry loop feeds back to the planner. Guessing is cheaper than a round trip
-only until the guess is wrong.
+- **`metric_column` defaulted to `salary`.** Asked for the average performance
+  score, a model that named the metric and forgot the column got `AVG(salary)`:
+  correctly computed, correctly tenant-scoped, and not the question asked. Now
+  inferred from `select` when that names exactly one numeric column, and
+  refused otherwise.
 
-**Two more defaults removed alongside it.** `Metric.column` fell back to
-`user_id`, so a metric built without a column became an aggregate over an
-identifier rather than an error. And the compiler *dropped* `distinct` whenever
-a metric was present: asked how many distinct departments there are, a model
-sending `select=[department], distinct, count` got back `department =
-Engineering; count_rows = 500` — one arbitrary department beside the count of
-every row. Both are now refused, with the refusal naming the two ways to ask
-what was meant.
+- **Two more silent substitutions.** `Metric.column` fell back to `user_id`, and
+  the compiler dropped `distinct` whenever a metric was present — so "how many
+  distinct departments" returned one arbitrary department beside the count of
+  every row. Both refused now.
 
-**A bare column beside an ungrouped aggregate is refused too.** `SELECT
-department, COUNT(*)` is invalid under `ONLY_FULL_GROUP_BY` and rejected by most
-engines; SQLite accepts it and fills the bare column from a row of its choosing.
-It defines that row for a lone `MIN`/`MAX`, which is why the trace above once
-returned `{'salary': 999999, 'max_salary': 999999}` and looked right while the
-same shape with `avg` did not. Depending on one engine's documented quirk to
-make a query mean what it appears to mean is the argument this project spends
-ADR-0006 rejecting, so the shape is refused on every aggregate. Grouping is
-unaffected: a column in `group_by` has exactly one value per output row.
+- **A bare column beside an ungrouped aggregate.** `SELECT department, COUNT(*)`
+  is invalid under `ONLY_FULL_GROUP_BY`; SQLite accepts it and fills the bare
+  column from a row of its choosing. Refused for every aggregate; `group_by` is
+  unaffected.
 
-**`COUNT(*)` contains a `Star` node.** A naive "reject any star" check in the
-sqlglot guard rejected legitimate counts. Caught by a test, not by review.
+- **`COUNT(*)` contains a `Star` node.** A naive "reject any star" check in the
+  sqlglot guard rejected legitimate counts. Caught by a test, not by review.
 
-**Docstrings leak into prompts.** The `QueryEmployeesArgs` docstring originally
-said "no tenant field, deliberately". A Pydantic class docstring becomes the
-JSON-schema `description` and is sent to the model — so the schema was pointing
-the model at exactly what it should not probe. A test asserting the serialised
-schemas contain no tenant-related word anywhere caught it. Now a `#` comment.
+- **Docstrings leak into prompts.** A Pydantic class docstring becomes the
+  JSON-schema `description` and is sent to the model. `QueryEmployeesArgs` said
+  "no tenant field, deliberately", pointing the model at what it should not
+  probe. Now a `#` comment.
 
-**LangGraph state has two opposite failure modes.** Without a reducer, state
-values are *replaced* on every node return, so the reasoning trace arrived
-empty. With a plain `operator.add`, the checkpointer that provides multi-turn
-memory carried the accumulator across turns, so turn two rendered turn one's
-steps. Resolved with a reducer that clears on a sentinel emitted by the first
-node: messages persist, the trace does not.
+- **LangGraph state fails in two opposite ways.** With no reducer, state values
+  are replaced on every node return and the reasoning trace arrives empty. With
+  `operator.add`, the checkpointer that provides multi-turn memory carries the
+  accumulator across turns. Fixed with a reducer that clears on a sentinel
+  emitted by the first node of each turn.
 
-**Small local models degenerate.** An early smoke test produced a correct answer
-followed by fifty seconds of one phrase repeated. Capping `num_predict` and
-adding a repeat penalty fixed it and bounded worst-case demo latency. A
-reasoning-capable model also returned empty `content` with everything in a
-thinking field, so the synthesiser falls back to the last tool result.
+- **Small local models degenerate.** An early smoke test produced a correct
+  answer followed by fifty seconds of one repeated phrase. Capping
+  `num_predict` and adding a repeat penalty fixed it. A reasoning-capable model
+  also returned empty `content` with everything in a thinking field, so the
+  synthesiser falls back to the last tool result.
 
-**Several bugs shared one shape: something that looked like coverage but was
-not.** The ablation harness patched a name nothing called. The guard node's
-`except Exception` swallowed a `TypeError` on every chart, so chart artifacts
-were never verified. The refusal reason was discarded before it reached the
-user. The statement timeout was a per-connection budget wearing a per-statement
-label. The red-team suite was green at 0.00% throughout all of it and would have
-stayed green — which is the reason the boundary sits at layer 4: what held was
-the layer that did not depend on anyone having anticipated the failure.
+- **Several bugs looked like coverage.** The ablation harness patched a name
+  nothing called. The guard's `except Exception` swallowed a `TypeError` on
+  every chart. The refusal reason was discarded before it reached the user. The
+  statement timeout was a per-connection budget wearing a per-statement label.
+  The red-team suite stayed green at 0.00% throughout — the layer that held is
+  the one that depends on nothing being anticipated.
 
-**The suite caught a bug in the thing it was measuring.** Ten of fifty cases
-ended with "I ran the query but could not phrase a summary": the tool had
-refused correctly, but the fallback that handles empty model output skipped
-refusal messages, so the reason never reached the user. Blocking someone and
-telling them nothing is over-blocking, and over-blocking is a tracked metric
-here precisely so it cannot hide behind a good leak rate. The refusal text was
-already written for a human — it just had to be allowed through.
+- **The suite caught a bug in the thing it measured.** Ten of fifty cases ended
+  with "I ran the query but could not phrase a summary": the tool refused
+  correctly, but the fallback for empty model output skipped refusal messages,
+  so the reason never reached the user. Over-blocking is tracked precisely so it
+  cannot hide behind a good leak rate.
 
-**Redundancy has to be justified, not assumed.** Because the connection is
-already tenant-scoped and has no `tenant_id` column, layer 3 has no tenant
-predicate to inject — every rejection it makes would also be made one layer
-down. It earns its place for actionable error messages, for k-anonymity (which
-is policy, not access control, and the database will not apply it), and for
-legible audit events. The module header says so explicitly, because redundancy
-mistaken for the boundary is how systems get misjudged as safe.
+- **Redundancy has to be justified.** The connection is already tenant-scoped
+  and has no `tenant_id` column, so layer 3 has no tenant predicate to inject —
+  every rejection it makes would also be made one layer down. It earns its place
+  for actionable error messages, for k-anonymity, and for legible audit events.
 
 ---
 
