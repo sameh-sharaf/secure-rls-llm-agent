@@ -395,6 +395,17 @@ was correctly blocked, which is what made it dangerous — the design looks like
 it works. Fixed by materialising a temp *table* and denying the base table with
 no exceptions at all. Kept as a named regression test. (ADR-0002)
 
+**Materialising per session trades memory for the guarantee.** The boundary
+works by copying the tenant's rows into a private in-memory database, so the
+cost of "other tenants' rows are absent" is one copy per signed-in session --
+about 500 rows here, and unworkable at five million. It is also a snapshot: a
+write to the source is not seen until the next login. Both costs are real and
+both disappear on a platform with native RLS, where the engine applies the
+filter without copying -- Postgres policies, Snowflake row access policies,
+Unity Catalog row filters. ADR-0004 sketches the Postgres profile. At this
+scale the copy is the right trade; at production scale the right move is to
+stop emulating row-level security and use the engine's own.
+
 **`COUNT(*)` contains a `Star` node.** A naive "reject any star" check in the
 sqlglot guard rejected legitimate counts. Caught by a test, not by review.
 
