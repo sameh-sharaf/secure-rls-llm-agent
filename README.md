@@ -507,21 +507,17 @@ Each is cited from the code at the line it explains.
   million — and a snapshot, so writes are not seen until the next login. Both
   costs disappear on a platform with native RLS. (ADR-0004)
 
-- **`metric_column` defaulted to `salary`.** Asked for the average performance
-  score, a model that named the metric and forgot the column got `AVG(salary)`:
-  correctly computed, correctly tenant-scoped, and not the question asked. Now
-  inferred from `select` when that names exactly one numeric column, and
-  refused otherwise.
-
-- **Two more silent substitutions.** `Metric.column` fell back to `user_id`, and
-  the compiler dropped `distinct` whenever a metric was present — so "how many
-  distinct departments" returned one arbitrary department beside the count of
-  every row. Both refused now.
-
-- **A bare column beside an ungrouped aggregate.** `SELECT department, COUNT(*)`
-  is invalid under `ONLY_FULL_GROUP_BY`; SQLite accepts it and fills the bare
-  column from a row of its choosing. Refused for every aggregate; `group_by` is
-  unaffected.
+- **Silent substitutions answer the wrong question confidently.**
+  `metric_column` defaulted to `salary`, `Metric.column` to `user_id`,
+  `distinct` was dropped whenever a metric was present, and a bare column beside
+  an ungrouped aggregate took its value from a row SQLite chose. Each turned
+  "the caller did not say" into "the caller said this": asked for the average
+  performance score, a model that named the metric and forgot the column got
+  `AVG(salary)` — correctly computed, correctly tenant-scoped, and not the
+  question asked. None was a security defect, and the cross-tenant leak rate
+  stayed at 0.00% throughout, which is why they survived. All four are now
+  resolved where exactly one reading exists and refused otherwise, with the
+  reason fed back to the planner to revise. (invariant 5e)
 
 - **`COUNT(*)` contains a `Star` node.** A naive "reject any star" check in the
   sqlglot guard rejected legitimate counts. Caught by a test, not by review.
