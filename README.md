@@ -310,13 +310,13 @@ separate object, not a change to the running app.
 SECURE_RLS_LAB=1 python -m streamlit run app.py
 ```
 
-Off by default, because a control labelled "switch the security layers off"
-sitting in a shipped app invites one reading and it is the wrong one.
+Off by default: a control that switches security layers off does not belong
+in a shipped app.
 
-Layers 1 and 2 have no switch, and that is the interesting part. L1 *builds*
-the session, so "off" is not a weaker system but no session at all; L2 is the
-shape of the tool schema, so "off" means writing a different tool that takes a
-tenant argument. Neither is a runtime check that can be skipped.
+Layers 1 and 2 have no switch. L1 *builds* the session, so "off" is not a
+weaker system but no session at all; L2 is the shape of the tool schema, so
+"off" means writing a different tool that takes a tenant argument. Neither is a
+runtime check that can be skipped.
 
 ---
 
@@ -481,9 +481,7 @@ Each is cited from the code at the line it explains.
 | [0005](docs/adr/0005-schema-introspection.md) | Derive the column allowlist from the catalog, not from hand-written lists | Three copies of one truth existed and nothing kept them in step |
 | [0006](docs/adr/0006-detach-the-source-database.md) | The agent's connection is a private database, not the data file | SQLite consults the authorizer for a join written with `ON` and not for one written with `USING` |
 
-Three of these exist because a first attempt was wrong. Without the record,
-the natural reaction to `db.py` is "why not just use a view, that would be
-simpler" — and 0002 is the reason not to.
+Three of these exist because a first attempt was wrong.
 
 ---
 
