@@ -13,12 +13,12 @@ instructed not to.
 
 ## Contents
 
-- [Repository layout](#repository-layout)
 - [Architecture](#architecture)
   - [Tenant binding](#tenant-binding)
   - [How SQLite gets real row-level security](#how-sqlite-gets-real-row-level-security)
   - [The agent](#the-agent)
   - [One question, traced through every layer](#one-question-traced-through-every-layer)
+- [Repository layout](#repository-layout)
 - [Setup](#setup)
   - [Tenant credentials](#tenant-credentials)
 - [Security testing](#security-testing)
@@ -33,46 +33,9 @@ instructed not to.
 
 ---
 
-## Repository layout
-
-```
-agent.py                     LangGraph state machine -- the application itself
-db.py                   L4   the boundary: a connection holding one tenant's rows
-app.py                       Streamlit UI (thin; no security logic)
-employees.csv                1000 rows, 3 tenants, seeded
-
-secure_rls/
-  session.py                 binds gateway + retriever + tools to one principal
-  tools/factory.py      L2   the tool contract -- no tool takes a tenant
-  rag/                       per-tenant Chroma collections, one per tenant
-  security/
-    principal.py        L1   who is asking; role -> column policy
-    gateway.py          L3   the single door to data; owns everything below
-    spec.py             L3   typed QuerySpec -> parameterised SQL
-    sql_guard.py        L3   model-written SQL -> sqlglot AST -> checked, rewritten
-    output_guard.py     L5   verifies rows against a privileged id set
-    audit.py            L5   hash-chained log of every access
-    layers.py           --   names which layer refused; enforces nothing
-    conversation.py     --   per-user transcripts, treated as tenant data
-
-evals/                       red-team + correctness suites, ablation, report
-tests/                       boundary, tool contract, gateway, RAG, graph topology
-docs/                        architecture, threat model, ADRs, agentic workflow
-.claude/                     CLAUDE.md invariants, slash commands, security reviewer,
-                             pre-commit hook that blocks a tenant parameter
-.github/workflows/           ci, eval (leak-rate gate), deploy
-```
-
-Start with `docs/threat-model.md`, then `db.py`, then
-`secure_rls/tools/factory.py`.
-
----
-
 ## Architecture
 
 Five layers. Layer 4 is the boundary; the rest are defence in depth.
-
-The shortest version, and the one worth holding in your head:
 
 ```
 model                       writes JSON (or SQL)   <- not a layer, not trusted
@@ -238,6 +201,41 @@ canary row**, a planted employee with an absurd salary, so returning it here is
 correct. If that number surfaced in a `beta` session, layer 5 would raise
 before anyone saw it.
 
+
+---
+
+## Repository layout
+
+```
+agent.py                     LangGraph state machine -- the application itself
+db.py                   L4   the boundary: a connection holding one tenant's rows
+app.py                       Streamlit UI (thin; no security logic)
+employees.csv                1000 rows, 3 tenants, seeded
+
+secure_rls/
+  session.py                 binds gateway + retriever + tools to one principal
+  tools/factory.py      L2   the tool contract -- no tool takes a tenant
+  rag/                       per-tenant Chroma collections, one per tenant
+  security/
+    principal.py        L1   who is asking; role -> column policy
+    gateway.py          L3   the single door to data; owns everything below
+    spec.py             L3   typed QuerySpec -> parameterised SQL
+    sql_guard.py        L3   model-written SQL -> sqlglot AST -> checked, rewritten
+    output_guard.py     L5   verifies rows against a privileged id set
+    audit.py            L5   hash-chained log of every access
+    layers.py           --   names which layer refused; enforces nothing
+    conversation.py     --   per-user transcripts, treated as tenant data
+
+evals/                       red-team + correctness suites, ablation, report
+tests/                       boundary, tool contract, gateway, RAG, graph topology
+docs/                        architecture, threat model, ADRs, agentic workflow
+.claude/                     CLAUDE.md invariants, slash commands, security reviewer,
+                             pre-commit hook that blocks a tenant parameter
+.github/workflows/           ci, eval (leak-rate gate), deploy
+```
+
+Start with `docs/threat-model.md`, then `db.py`, then
+`secure_rls/tools/factory.py`.
 
 ---
 
