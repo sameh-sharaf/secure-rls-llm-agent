@@ -185,3 +185,30 @@ def test_the_default_gateway_records_no_such_event() -> None:
         assert not [e for e in gw.audit.entries() if e.tool == "__gateway__"]
     finally:
         gw.close()
+
+
+def test_the_route_filter_does_not_claim_to_be_a_layer() -> None:
+    """A regex must not be credited with the identity binding's guarantee.
+
+    `route`'s refusals were labelled "L1 identity & role policy", which reads
+    as the identity control having caught an impersonation attempt. It had
+    not. L1 works by never rebuilding the principal from user input, so
+    impersonation is impossible downstream rather than detected here -- and
+    the regex that *did* refuse is evadable in about ten seconds. A reader of
+    this repository drew exactly the wrong conclusion from that label.
+    """
+    from agent import ROUTE_LABEL
+    from secure_rls.security.layers import Layer
+
+    assert "L1" not in ROUTE_LABEL
+    assert ROUTE_LABEL not in {layer.label for layer in Layer}
+    assert "not a security control" in ROUTE_LABEL
+
+
+def test_a_real_role_refusal_is_still_attributed_to_l1() -> None:
+    """The relabel must not have loosened the attribution that was correct."""
+    from secure_rls.security.layers import Layer, tag
+    from secure_rls.security.spec import SpecError
+    from secure_rls.tools.factory import refusal_layer
+
+    assert refusal_layer(tag(SpecError("x"), Layer.L1)) == "L1 identity & role policy"

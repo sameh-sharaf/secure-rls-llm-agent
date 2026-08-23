@@ -240,6 +240,19 @@ def system_prompt(session: Session, *, include_policy: bool = True) -> str:
 # control -- a question that slips past it is still handled safely by every
 # layer below. Keeping it out of the LLM saves a full round trip per turn.
 
+#: What the trace calls a refusal made here.
+#:
+#: Deliberately not "L1". These refusals come from the regexes below, which are
+#: a phrasing heuristic and not a layer at all -- they are trivially evadable,
+#: and anything slipping past them is handled by the layers underneath. Calling
+#: them L1 attributed the refusal to the identity binding, which is a real
+#: control that works in an entirely different way: the principal comes from
+#: the server-side session and is never rebuilt from anything the user typed,
+#: so impersonation is not *detected* here, it is impossible downstream. A
+#: label that credits a disposable filter with a structural guarantee reads the
+#: architecture backwards, and it misled a reader of this repository.
+ROUTE_LABEL = "route (pre-layer filter, not a security control)"
+
 _OFF_TOPIC = re.compile(
     r"\b(weather|recipe|joke|poem|football|movie|translate|capital of|who won)\b", re.I
 )
@@ -343,7 +356,7 @@ class SecureAgent:
                 ),
                 "rejections": ["__reset__"],
                 "turn_start": turn_start,
-                "trace": fresh + [step("refuse", "Out of scope", status="refused", layer="L1 identity & role policy")],
+                "trace": fresh + [step("refuse", "Out of scope", status="refused", layer=ROUTE_LABEL)],
             }
 
         if _INSTRUCTION_OVERRIDE.search(question):
@@ -363,7 +376,7 @@ class SecureAgent:
                         "refuse",
                         "Instruction-override attempt",
                         status="refused",
-                        layer="L1 identity & role policy",
+                        layer=ROUTE_LABEL,
                     )
                 ],
             }
@@ -382,7 +395,7 @@ class SecureAgent:
                 "rejections": ["__reset__"],
                 "turn_start": turn_start,
                 "trace": fresh + [step("refuse", "Request spans organisations", status="refused",
-                              layer="L1 identity & role policy")],
+                              layer=ROUTE_LABEL)],
             }
 
         return {
