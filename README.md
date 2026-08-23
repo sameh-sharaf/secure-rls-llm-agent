@@ -1,6 +1,6 @@
 # secure-rls-llm-agent
 
-A conversational data analyst over a multi-tenant HR dataset, where the LLM is
+A conversational LLM agent over a multi-tenant HR dataset, where the model is
 **structurally incapable** of reading another tenant's rows — not merely
 instructed not to.
 
