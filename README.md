@@ -234,9 +234,6 @@ docs/                        architecture, threat model, ADRs, agentic workflow
 .github/workflows/           ci, eval (leak-rate gate), deploy
 ```
 
-Start with `docs/threat-model.md`, then `db.py`, then
-`secure_rls/tools/factory.py`.
-
 ---
 
 ## Setup
