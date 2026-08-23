@@ -638,11 +638,14 @@ Each is cited from the code at the line it explains.
 | Review pass: role-boundary and agent fixes | 4 |
 | Layer lab, layer trace, audit panel | 3 |
 | CI repair, README and walkthrough rewrite | 3 |
-| **Total** | **~36** |
+| Review pass: doc accuracy, silent substitutions, three-model re-eval | 4 |
+| **Total** | **~40** |
 
-The last three rows are a second pass over a system that already worked. It
-found the masked-column gap in `filters` and `order_by`, a `UNION` refused
-with a reason that was not true, a refusal that rendered the previous turn's
-results, and a nightly eval that had been silently cancelling at its timeout
-every night. None of those were visible from the outside, which is the
-argument for the pass.
+The last four rows are review passes over a system that already worked. The
+first found the masked-column gap in `filters` and `order_by`, a `UNION`
+refused with a reason that was not true, a refusal that rendered the previous
+turn's results, and a nightly eval that had been silently cancelling at its
+timeout every night. The second found four silent value substitutions in the
+query compiler — each one a confident answer to a question nobody asked — and
+several documentation claims that no longer matched the code. None of it was
+visible from the outside, which is the argument for the passes.
