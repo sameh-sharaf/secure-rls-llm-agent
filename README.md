@@ -167,12 +167,26 @@ SELECT MAX(salary) AS max_salary FROM employees WHERE department = ? LIMIT ?
 
 `"Operations"` is a **bound parameter**, not part of the SQL text. The statement
 handed to SQLite ends at `department = ?`; the value travels beside it and is
-never parsed as SQL. Had the model written `Operations' OR '1'='1`, the database
-would look for a department literally named that and find none — a value cannot
-change the shape of a statement it was never spliced into. There is no tenant
-filter because there are no other tenants to exclude. The *same spec* as
-`acme_analyst` is refused here instead -- that role may not read an individual
-salary, and is pointed at `p90`, a median or an average.
+never parsed as SQL.
+
+Binding is a *role* control here, not a tenant one. The tenant boundary does not
+depend on it: splice the value in instead, and a `UNION SELECT ... FROM
+employees_base` still gets `no such table`, while `' OR 1=1 --` still reads only
+acme's own rows. What binding protects is the column policy, which is checked
+against the *spec* above rather than against the finished SQL. Spliced into the
+statement above, the value `Operations' UNION SELECT salary FROM employees --`
+returns 209 individual salaries, from 30,000 up to the 999,999 canary. For an
+`analyst` that is an individual-salary read the mask never sees, because the
+spec it checked names `salary` only inside `MAX()`.
+
+Values are the only position where this arises. SQL binds values, never
+identifiers — there is no `SELECT ? FROM ?` — so `column` and `op` come from
+closed enums and are safe to interpolate, and values are bound. Between the two,
+no string the model produced reaches the SQL text.
+
+There is no tenant filter because there are no other tenants to exclude. The
+*same spec* as `acme_analyst` is refused here instead -- that role may not read
+an individual salary, and is pointed at `p90`, a median or an average.
 
 **L4** (`db.py`) runs it against a connection holding 500 acme rows:
 
