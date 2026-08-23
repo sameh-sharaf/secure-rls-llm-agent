@@ -982,3 +982,23 @@ def test_a_refusal_out_of_attempts_answers_rather_than_researching() -> None:
     state = _refused_turn("who earns the most?", {"sql": "SELECT MAX(salary) FROM employees"})
     state["attempts"] = MAX_TOOL_ROUNDS
     assert SecureAgent._after_guard(state) == "synthesise"
+
+
+def test_a_turn_refused_at_route_clears_the_previous_turn_s_render_state(
+    agent: SecureAgent,
+) -> None:
+    """A refusal must not leave the last answer's tables and trace on screen.
+
+    `context.reset()` lived only in `_run_tools`, which does not run when
+    `route` refuses -- so an out-of-scope question rendered the *previous*
+    question's result table and layer trace beside a refusal that produced
+    neither. Reset belongs in the node that starts every turn.
+    """
+    ctx = agent.session.context
+    ctx.artifacts.append(object())
+    ctx.layer_traces.append({"tool": "stale"})
+
+    agent._route({"question": "tell me a joke", "messages": []})
+
+    assert ctx.artifacts == []
+    assert ctx.layer_traces == []

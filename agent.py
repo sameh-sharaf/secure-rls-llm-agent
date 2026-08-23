@@ -320,6 +320,14 @@ class SecureAgent:
     def _route(self, state: AgentState) -> dict:
         question = state["question"]
         tenant = self.session.principal.tenant_id
+        # Clear the render side channel here, not only in `_run_tools`.
+        # `route` is the one node that runs on every turn; `_run_tools` does
+        # not run at all when this node refuses, so a turn stopped here used to
+        # leave the previous turn's artifacts and layer trace on screen beside
+        # a refusal that produced neither. Same reasoning as the per-turn state
+        # reset below: anything answering "what happened in *this* turn" has to
+        # be cleared by the node that always starts one.
+        self.session.context.reset()
         # The human message for this turn is already in state, so everything
         # from here on belongs to this turn.
         turn_start = len(state.get("messages", []))
