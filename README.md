@@ -19,6 +19,7 @@ instructed not to.
   - [The agent](#the-agent)
   - [One question, traced through every layer](#one-question-traced-through-every-layer)
 - [Repository layout](#repository-layout)
+- [Decision records](#decision-records)
 - [Setup](#setup)
   - [Tenant credentials](#tenant-credentials)
 - [Security testing](#security-testing)
@@ -215,6 +216,26 @@ docs/                        architecture, threat model, ADRs, agentic workflow
                              pre-commit hook that blocks a tenant parameter
 .github/workflows/           ci, eval (leak-rate gate), deploy
 ```
+
+---
+
+## Decision records
+
+`docs/adr/` — one short document per decision that would otherwise look
+arbitrary. Six of them, cited from the code at the line each one explains.
+
+| | Decision | Why it exists |
+|---|---|---|
+| [0001](docs/adr/0001-tenant-binding.md) | Tenant identity is bound in a closure, never a tool argument | Anything the model can name, it can be persuaded to change |
+| [0002](docs/adr/0002-sqlite-authorizer.md) | Materialise a per-tenant temp table; deny the base table unconditionally | The obvious temp-*view* design has a real bypass: a CTE named after the view impersonates it |
+| [0003](docs/adr/0003-langgraph-over-agent-executor.md) | A LangGraph state machine rather than a prebuilt agent loop | Three nodes are security controls, and a control belongs in the topology, not in a convention |
+| [0004](docs/adr/0004-postgres-parity.md) | SQLite stays the default; Postgres native RLS is the production shape | The per-session copy is right at 500 rows and wrong at five million |
+| [0005](docs/adr/0005-schema-introspection.md) | Derive the column allowlist from the catalog, not from hand-written lists | Three copies of one truth existed and nothing kept them in step |
+| [0006](docs/adr/0006-detach-the-source-database.md) | The agent's connection is a private database, not the data file | SQLite consults the authorizer for a join written with `ON` and not for one written with `USING` |
+
+Three of these exist because a first attempt was wrong. Without the record,
+the natural reaction to `db.py` is "why not just use a view, that would be
+simpler" — and 0002 is the reason not to.
 
 ---
 
