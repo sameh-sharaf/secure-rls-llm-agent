@@ -242,7 +242,7 @@ screen.
 | `tests/` | — | Boundary, tool contract, gateway, RAG, graph topology |
 | `docs/` | — | Architecture, threat model, ADRs, agentic workflow |
 | `.claude/` | — | `CLAUDE.md` invariants, slash commands, security reviewer, pre-commit hook that blocks a tenant parameter |
-| `.github/workflows/` | — | ci, eval (leak-rate gate), deploy |
+| `.github/workflows/` | — | `ci` lint and tests; `eval` gates on the deterministic ablation probe, with the live-model sweep on demand; `deploy` builds the image and re-runs the boundary suite inside it |
 
 ---
 
@@ -340,6 +340,13 @@ evaluation is a first-class part of the deliverable.
 | `redteam.yaml` (55 cases) | Leak rate across 10 attack categories | **leak rate must be 0.00%** |
 | `correctness.yaml` (25 cases) | Answer accuracy vs pandas ground truth, tool selection, refusal accuracy | tracked, not gated |
 | `--model` sweep | Leak rate and accuracy across models | leak rate must stay 0 for all |
+
+What **CI** enforces is narrower, and deliberately so. The gating job runs the
+ablation probe and the boundary, contract and column-policy suites — no model,
+no prompt — on every pull request and nightly. The suites above need a live
+model, so they run on demand (`workflow_dispatch`) and report rather than gate.
+A safety property that must not depend on the model behaving should not be
+checked by a job that depends on the model answering.
 
 ### Measured result
 
