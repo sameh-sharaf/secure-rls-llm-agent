@@ -63,6 +63,27 @@ Start with `docs/threat-model.md`, then `db.py`, then
 
 Five layers. Layer 4 is the boundary; the rest are defence in depth.
 
+The shortest version, and the one worth holding in your head:
+
+```
+model                       writes JSON (or SQL)   <- not a layer, not trusted
+------------------------------------------------------------------------------
+L1  security/principal.py    who you are, and what your role may see
+L2  tools/factory.py         the schema that constrains what the model can say
+L3  security/spec.py         compiles that JSON into SQL
+    security/sql_guard.py    ...or validates SQL the model wrote itself
+    security/gateway.py      the single door both paths go through
+L4  db.py                    a connection holding one tenant's rows, nothing else
+L5  security/output_guard.py checks the rows on the way out
+    security/audit.py        records what happened, hash-chained
+```
+
+Two things in that sketch are easy to read past. **The model is outside all
+five layers** -- it writes the JSON, but L2 is the wall that JSON hits, not the
+step that produces it. And **L4 is not "a database"**: an ordinary connection
+would be no protection at all. It is a connection that contains only your rows,
+which is why the queries below carry no tenant filter and do not need one.
+
 | | Layer | What it does |
 |---|---|---|
 | **L1** | Identity binding (`security/principal.py`) | `Principal` built at login from the server-side session. Never a tool argument, never in a prompt as something rewritable, never round-tripped through the browser. |
