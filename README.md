@@ -23,9 +23,8 @@ instructed not to.
   - [Tenant credentials](#tenant-credentials)
 - [Security testing](#security-testing)
 - [Evaluation](#evaluation)
-  - [Measured result](#measured-result)
-  - [Model bake-off](#model-bake-off)
-  - [Two role-boundary defects found by the bake-off](#two-role-boundary-defects-found-by-the-bake-off)
+  - [Results](#results)
+  - [Two role-boundary defects found by comparing models](#two-role-boundary-defects-found-by-comparing-models)
   - [How the verdict is computed](#how-the-verdict-is-computed)
 - [Testing](#testing)
 - [Decision records](#decision-records)
@@ -106,6 +105,19 @@ route ─┬─> refuse (terminal, never touches a data tool)
              └───────────────────────┼─> synthesise ──> answer
                                      └─> refuse
 ```
+
+Seven nodes. Three of them are security controls, which is the reason the
+agent is a graph at all (ADR-0003):
+
+| Node | Layer | What it does | Why it is a node rather than a step |
+|---|---|---|---|
+| `route` | — | Deterministic regex filter for off-topic and scope-widening phrasing. Also the one node that runs every turn, so it clears per-turn state. | Not a security control, and labelled as such in the trace — it is trivially evadable, and everything it misses is handled below. Keeping it out of the LLM saves a round trip. |
+| `plan` | — | Calls the model with the tools bound; it either emits tool calls or answers. | — |
+| `tools` | L2 | Executes the calls. Pydantic validates each against the tool schema first, so an invented field or a tenant key fails here. | Tools are closures over one gateway; the node holds no connection and no tenant. |
+| `guard` | **L5** | Verifies every result against the privileged id set, scans for foreign canaries, writes the audit entry. | **The only outgoing edge from `tools`.** No result reaches the model without passing it — asserted against the compiled graph, not by convention. |
+| `retry` | — | Feeds a policy rejection back to `plan` with its reason attached, at most twice. | Makes self-correction bounded and measurable instead of an unbounded loop or a raised error. |
+| `synthesise` | — | Writes the final answer, then checks every figure in it traces to the question, the prompt, or a tool result from this turn. | Grounding is enforced here rather than asked for in the prompt. |
+| `refuse` | — | Terminal. Answers with the refusal reason and the layer that produced it. | Holds no data tool, so a refusal is a state the graph reached rather than a sentence the model chose to emit. |
 
 `guard → plan` is the research loop. With a single round the model has to
 commit to every query it will make before seeing a row, which is fine for "how
@@ -348,68 +360,53 @@ model, so they run on demand (`workflow_dispatch`) and report rather than gate.
 A safety property that must not depend on the model behaving should not be
 checked by a job that depends on the model answering.
 
-### Measured result
+### Results
 
-`gemma4:26b-a4b-it-q4_K_M`, 2026-08-21:
+All three models, both suites, same seeded dataset, same machine, 2026-08-23.
+80 cases per model — 55 red-team, 25 correctness — 240 in total.
 
-| | Red team (50 cases) | Correctness (25 cases) |
-|---|---|---|
-| **Leak rate** | **0.00%** (0 / 50) | **0.00%** (0 / 25) |
-| Pass rate | 100.0% | 100.0% |
-| Refusal accuracy | 100.0% | — |
-| Tool-selection accuracy | — | 100.0% |
-| Answer accuracy vs pandas | — | 100.0% |
-| Errors | 0 | 0 |
-| Latency p50 / p95 | 29.1s / 50.4s | 10.5s / 19.2s |
+| | `llama3.1:8b` | `qwen2.5:7b` | `gemma4:26b-a4b` |
+|---|---:|---:|---:|
+| **Cross-tenant leak rate** | **0.00%** | **0.00%** | **0.00%** |
+| Red-team pass rate | 92.7% | 94.5% | 94.5% |
+| Refusal accuracy | 80.0% | 85.0% | 85.0% |
+| Correctness pass rate | 56.0% | 92.0% | 96.0% |
+| Tool-selection accuracy | 100% | 100% | 100% |
+| Answer accuracy vs pandas | 38.9% | 88.9% | 94.4% |
+| Errors | 0 | 0 | 0 |
+| Red-team latency p50 / p95 | 1.9s / 4.7s | 2.1s / 4.5s | 29.5s / 72.1s |
+| Correctness latency p50 / p95 | 2.2s / 3.4s | 1.6s / 4.7s | 11.9s / 26.5s |
+
+Zero leaks in every category, for every model:
 
 | Category | Cases | Leaks | Category | Cases | Leaks |
 |---|---:|---:|---|---:|---:|
-| exfiltration | 8 | 0 | schema probing | 4 | 0 |
-| sql smuggling | 8 | 0 | indirect injection | 4 | 0 |
-| impersonation | 6 | 0 | obfuscation | 4 | 0 |
-| differencing | 5 | 0 | tool poisoning | 4 | 0 |
-| role escalation | 4 | 0 | multi-turn drift | 3 | 0 |
+| exfiltration | 8 | 0 | tool poisoning | 4 | 0 |
+| sql smuggling | 8 | 0 | schema probing | 4 | 0 |
+| differencing | 7 | 0 | indirect injection | 4 | 0 |
+| role escalation | 7 | 0 | obfuscation | 4 | 0 |
+| impersonation | 6 | 0 | multi-turn drift | 3 | 0 |
 
-Those counts are the suite **as it stood for that run**. It has since grown to
-55: the `MIN`/`MAX` handling described below added two `differencing` cases and
-one `role_escalation` case, and closing the mask across `filters` and
-`order_by` added two more `role_escalation` cases. The recorded JSON in
-`evals/results/` is the 50-case run and is left as it was — a measurement is
-dated evidence, not a number to keep edited into agreement.
+**Answer accuracy spans 39% to 94% and latency spans 18×, while the
+cross-tenant leak rate is 0.00% for all three.** The tenant boundary sits below
+the model, so swapping a 26B for a 7B changes answer quality and speed and
+nothing about safety. Model choice is a quality-and-latency decision rather
+than a safety one, which is the result this comparison exists to produce.
 
-The first full run scored 46/50 with the same **0.00% leak rate**. All four
-misses were refusals that worked and then failed to *explain* themselves — the
-user was blocked and told nothing. That is over-blocking with the explanation
-discarded, which is a failure mode this suite exists to catch, and it is fixed
-in `e35b61b`.
+Two caveats on the quality numbers, since they are easy to over-read:
 
-### Model bake-off
+- **Tool-selection accuracy is 100% for all three, and it is graded on four
+  cases.** It is not comparable evidence to answer accuracy, which is graded on
+  eighteen. Picking the right tool is the easy part.
+- **`llama3.1:8b`'s 38.9% is a tool-calling failure, not a wrong-answer
+  problem.** It answered 7 of 18 graded questions without calling a tool at
+  all, against 17 of 18 for `qwen2.5:7b` — a *smaller* model on the identical
+  schema. When llama did call a tool it chose correctly every time. Four repeat
+  runs gave 38.9 / 38.9 / 27.8 / 38.9, so the figure is stable rather than a
+  bad draw. Widening that gap is listed under [Future
+  work](#future-work); it does not touch the boundary.
 
-Same suites, same seeded dataset, same machine. Three local models via Ollama,
-78 cases each (53 red-team + 25 correctness).
-
-| model | cross-tenant leak | red-team pass | refusal acc. | tool acc. | answer acc. | p50 |
-|---|---:|---:|---:|---:|---:|---:|
-| `llama3.1:8b` | **0.00%** | 84.9% | 57.9% | 100.0% | 72.2% | 2.1s |
-| `qwen2.5:7b` | **0.00%** | 88.7% | 68.4% | 100.0% | 77.8% | 1.6s |
-| `gemma4:26b-a4b` | **0.00%** | 98.1% | 94.7% | 100.0% | 100.0% | 30.6s |
-
-Measured after the two fixes described below, against a suite that grew by
-three cases because of them. The earlier run (llama 90% / qwen 94% / gemma
-100%) was against a suite that did not yet contain the cases these models fail
-— which is the correct direction for a security suite to move.
-
-Answer accuracy spans 72% to 100% and latency spans 19×, while the cross-tenant
-leak rate is 0.00% for all three. The tenant boundary sits below the model, so
-swapping a 26B for a 7B changes answer quality and speed and *nothing about
-safety*. Model choice is therefore a quality-and-latency decision rather than a
-safety one.
-
-Tool-selection accuracy is 100% everywhere: picking the right tool is easy, and
-using it correctly is not. Most small-model failures were counting questions and
-refusals phrased so as not to look like refusals.
-
-#### Two role-boundary defects found by the bake-off
+#### Two role-boundary defects found by comparing models
 
 Both were found by running a weaker model and reading its output — not by
 design review, not by the red-team suite, and not by the deterministic tests.
@@ -647,12 +644,3 @@ Each is cited from the code at the line it explains.
 | CI repair, README and walkthrough rewrite | 3 |
 | Review pass: doc accuracy, silent substitutions, three-model re-eval | 4 |
 | **Total** | **~40** |
-
-The last four rows are review passes over a system that already worked. The
-first found the masked-column gap in `filters` and `order_by`, a `UNION`
-refused with a reason that was not true, a refusal that rendered the previous
-turn's results, and a nightly eval that had been silently cancelling at its
-timeout every night. The second found four silent value substitutions in the
-query compiler — each one a confident answer to a question nobody asked — and
-several documentation claims that no longer matched the code. None of it was
-visible from the outside, which is the argument for the passes.
