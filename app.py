@@ -512,6 +512,18 @@ ATTACKS = {
 }
 
 
+#: Attacks that actually reach a tool, and therefore produce a layer trace.
+#: The rest are refused by the `route` regex before any layer is consulted --
+#: a real behaviour worth showing, but not one the layer trace can illustrate.
+REACHES_A_LAYER = frozenset({
+    "SQL: read the base table",
+    "SQL: CTE impersonation",
+    "SQL: union smuggle",
+    "Schema probing",
+    "Indirect injection via notes",
+})
+
+
 def render_security(session) -> None:
     tenant = session.principal.tenant_id
     st.subheader("Security")
@@ -537,7 +549,19 @@ def render_security(session) -> None:
         "stops it. None of them can succeed — the connection this session holds cannot "
         "reach another organisation's rows."
     )
-    choice = st.selectbox("Attack", list(ATTACKS))
+    # Ordered so the ones that exercise L2-L5 come first. The four below them
+    # are stopped by the `route` regex before any layer is reached, which is
+    # worth demonstrating and is *not* what the layer trace is for -- clicking
+    # one and seeing an empty trace reads as a broken panel.
+    reaches = [k for k in ATTACKS if k in REACHES_A_LAYER]
+    early = [k for k in ATTACKS if k not in REACHES_A_LAYER]
+    choice = st.selectbox(
+        "Attack",
+        reaches + early,
+        format_func=lambda k: (
+            f"{k}  —  reaches L2-L5" if k in REACHES_A_LAYER else f"{k}  —  stopped early, no layer"
+        ),
+    )
     st.code(ATTACKS[choice], language="text")
     if st.button("Run this attack", type="primary"):
         with st.spinner("Running…"):
@@ -545,7 +569,7 @@ def render_security(session) -> None:
         st.markdown("**Result**")
         st.write(reply.answer)
         render_trace(reply.trace)
-        render_layer_trace(session)
+        render_layer_trace(session, reply)
         leaked = any(token in reply.answer for token in foreign)
         stopped_by = [s["layer"] for s in reply.trace if s.get("layer")]
         used_a_tool = bool(reply.tools_used)
@@ -569,7 +593,7 @@ def render_security(session) -> None:
     render_layer_lab(session)
 
 
-def render_layer_trace(session) -> None:
+def render_layer_trace(session, reply=None) -> None:
     """What each layer received and produced, for the calls this turn made.
 
     The trace above says which steps ran. This says what they did to the
@@ -579,11 +603,24 @@ def render_layer_trace(session) -> None:
     """
     traces = getattr(session.context, "layer_traces", [])
     if not traces:
-        st.caption(
-            "No tool ran, so no layer was reached. Nothing here to show -- which is "
-            "itself the weakest way a request can fail, because it depended on the "
-            "model declining rather than on a control."
-        )
+        kinds = [s.get("kind") for s in (reply.trace if reply else [])]
+        if kinds and kinds[0] == "refuse":
+            st.info(
+                "**Stopped before any layer.** The `route` regex matched this phrasing "
+                "and ended the turn, so no model call, no tool call and no layer ran — "
+                "there is nothing for a layer trace to show.\n\n"
+                "That filter is a convenience, not a control: it is trivially evadable, "
+                "and anything slipping past it is handled by the layers below. To watch "
+                "L2-L5 actually work, pick one of the attacks marked "
+                "**reaches L2-L5**."
+            )
+        else:
+            st.info(
+                "**No tool was called,** so no layer was reached. The model answered "
+                "from the prompt alone — the weakest way a request can fail here, "
+                "because it depended on the model declining rather than on a control. "
+                "Pick an attack marked **reaches L2-L5** to see the layers run."
+            )
         return
 
     st.markdown("**Layer by layer**")

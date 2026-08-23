@@ -360,6 +360,9 @@ def _trace_layers(
     validated: str | None = None,
     result: QueryResult | None = None,
     exc: Exception | None = None,
+    rows: int | None = None,
+    path: str | None = None,
+    verdict: str | None = None,
 ) -> None:
     """Record what each layer saw and produced for one tool call.
 
@@ -376,7 +379,16 @@ def _trace_layers(
         "refused_by": refusal_layer(exc) if exc is not None else None,
         "reason": str(exc) if exc is not None else None,
     }
-    if result is not None:
+    if rows is not None:
+        # A path that reaches data without compiling SQL -- retrieval. The
+        # layers still apply, they just are not a query, and saying so beats
+        # rendering an empty SQL box.
+        entry["l3_sql"] = path or "(no SQL -- retrieval path)"
+        entry["l3_params"] = []
+        entry["l3_rewrites"] = []
+        entry["l4_rows"] = rows
+        entry["l5_verdict"] = verdict
+    elif result is not None:
         entry["l3_sql"] = result.sql
         entry["l3_params"] = list(result.params or [])
         entry["l3_rewrites"] = list(result.rewrites or [])
@@ -696,12 +708,23 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
     def search_notes(query: str, top_k: int = 5) -> str:
         if context.retriever is None:
             return "Note search is unavailable; the index has not been built."
+        raw = {"query": query, "top_k": top_k}
         try:
             notes = context.retriever.search(query, top_k=top_k)
         except Exception as exc:
             context.rejections.append(str(exc))
+            _trace_layers(context, "search_notes", raw, query, exc=exc)
             return _explain_refusal(exc)
 
+        _trace_layers(
+            context, "search_notes", raw, query,
+            rows=len(notes),
+            path=f"Chroma collection notes_{gateway.principal.tenant_id} (one per tenant)",
+            verdict=(
+                f"{len(notes)} chunk(s), every user_id checked against the privileged set; "
+                f"text wrapped as untrusted data"
+            ),
+        )
         if not notes:
             return "No notes in your organisation matched that description."
 
