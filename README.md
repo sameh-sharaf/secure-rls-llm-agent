@@ -19,7 +19,6 @@ instructed not to.
   - [The agent](#the-agent)
   - [One question, traced through every layer](#one-question-traced-through-every-layer)
 - [Repository layout](#repository-layout)
-- [Decision records](#decision-records)
 - [Setup](#setup)
   - [Tenant credentials](#tenant-credentials)
 - [Security testing](#security-testing)
@@ -29,6 +28,7 @@ instructed not to.
   - [Two role-boundary defects found by the bake-off](#two-role-boundary-defects-found-by-the-bake-off)
   - [How the verdict is computed](#how-the-verdict-is-computed)
 - [Testing](#testing)
+- [Decision records](#decision-records)
 - [Challenges](#challenges)
 - [Time spent](#time-spent)
 
@@ -192,65 +192,42 @@ audit   = tool=query_db rows=1 outcome=ok
 No `user_id` was projected, so there was no id to check against the privileged
 set -- the guard says exactly that rather than implying it verified more.
 
-Two things the trace shows that prose does not. **Nothing carries a tenant** --
+One thing the trace shows that prose does not: **nothing carries a tenant** --
 not the JSON, not the spec, not the SQL; the word never appears after login,
-because the connection makes it unnecessary. And the **999,999 is acme's own
-canary row**, a planted employee with an absurd salary, so returning it here is
-correct. If that number surfaced in a `beta` session, layer 5 would raise
-before anyone saw it.
+because the connection makes it unnecessary.
+
+The 999,999 is acme's own canary row. If that value surfaced in a `beta`
+session, layer 5 would raise `LeakDetected` from `OutputGuard.check_rows`,
+which aborts the request -- the row never reaches the model, the answer or the
+screen.
 
 
 ---
 
 ## Repository layout
 
-```
-agent.py                     LangGraph state machine -- the application itself
-db.py                   L4   the boundary: a connection holding one tenant's rows
-app.py                       Streamlit UI (thin; no security logic)
-employees.csv                1000 rows, 3 tenants, seeded
-
-secure_rls/
-  session.py                 binds gateway + retriever + tools to one principal
-  tools/factory.py      L2   the tool contract -- no tool takes a tenant
-  rag/                       one Chroma collection per tenant
-  security/
-    principal.py        L1   who is asking; role -> column policy
-    gateway.py          L3   owns the connection; every read goes through it
-    spec.py             L3   typed QuerySpec -> parameterised SQL
-    sql_guard.py        L3   model-written SQL -> sqlglot AST -> checked, rewritten
-    output_guard.py     L5   verifies rows against a privileged id set
-    audit.py            L5   hash-chained log of every access
-    layers.py           --   names which layer refused; enforces nothing
-    conversation.py     --   per-user transcripts, treated as tenant data
-
-evals/                       red-team + correctness suites, ablation, report
-tests/                       boundary, tool contract, gateway, RAG, graph topology
-docs/                        architecture, threat model, ADRs, agentic workflow
-.claude/                     CLAUDE.md invariants, slash commands, security reviewer,
-                             pre-commit hook that blocks a tenant parameter
-.github/workflows/           ci, eval (leak-rate gate), deploy
-```
-
----
-
-## Decision records
-
-`docs/adr/` — one short document per decision that would otherwise look
-arbitrary. Six of them, cited from the code at the line each one explains.
-
-| | Decision | Why it exists |
+| Path | Layer | What it is |
 |---|---|---|
-| [0001](docs/adr/0001-tenant-binding.md) | Tenant identity is bound in a closure, never a tool argument | Anything the model can name, it can be persuaded to change |
-| [0002](docs/adr/0002-sqlite-authorizer.md) | Materialise a per-tenant temp table; deny the base table unconditionally | The obvious temp-*view* design has a real bypass: a CTE named after the view impersonates it |
-| [0003](docs/adr/0003-langgraph-over-agent-executor.md) | A LangGraph state machine rather than a prebuilt agent loop | Three nodes are security controls, and a control belongs in the topology, not in a convention |
-| [0004](docs/adr/0004-postgres-parity.md) | SQLite stays the default; Postgres native RLS is the production shape | The per-session copy is right at 500 rows and wrong at five million |
-| [0005](docs/adr/0005-schema-introspection.md) | Derive the column allowlist from the catalog, not from hand-written lists | Three copies of one truth existed and nothing kept them in step |
-| [0006](docs/adr/0006-detach-the-source-database.md) | The agent's connection is a private database, not the data file | SQLite consults the authorizer for a join written with `ON` and not for one written with `USING` |
-
-Three of these exist because a first attempt was wrong. Without the record,
-the natural reaction to `db.py` is "why not just use a view, that would be
-simpler" — and 0002 is the reason not to.
+| `agent.py` | — | LangGraph state machine — the application itself |
+| `db.py` | **L4** | The boundary: a connection holding one tenant's rows |
+| `app.py` | — | Streamlit UI (thin; no security logic) |
+| `employees.csv` | — | 1000 rows, 3 tenants, seeded |
+| `secure_rls/session.py` | — | Binds gateway + retriever + tools to one principal |
+| `secure_rls/tools/factory.py` | **L2** | The tool contract — no tool takes a tenant |
+| `secure_rls/rag/` | — | One Chroma collection per tenant |
+| `secure_rls/security/principal.py` | **L1** | Who is asking; role → column policy |
+| `secure_rls/security/gateway.py` | **L3** | Owns the connection; every read goes through it |
+| `secure_rls/security/spec.py` | **L3** | Typed `QuerySpec` → parameterised SQL |
+| `secure_rls/security/sql_guard.py` | **L3** | Model-written SQL → sqlglot AST → checked, rewritten |
+| `secure_rls/security/output_guard.py` | **L5** | Verifies rows against a privileged id set |
+| `secure_rls/security/audit.py` | **L5** | Hash-chained log of every access |
+| `secure_rls/security/layers.py` | — | Names which layer refused; enforces nothing |
+| `secure_rls/security/conversation.py` | — | Per-user transcripts, treated as tenant data |
+| `evals/` | — | Red-team + correctness suites, ablation, report |
+| `tests/` | — | Boundary, tool contract, gateway, RAG, graph topology |
+| `docs/` | — | Architecture, threat model, ADRs, agentic workflow |
+| `.claude/` | — | `CLAUDE.md` invariants, slash commands, security reviewer, pre-commit hook that blocks a tenant parameter |
+| `.github/workflows/` | — | ci, eval (leak-rate gate), deploy |
 
 ---
 
@@ -488,6 +465,25 @@ or the statement is rejected**. There is no third outcome.
 
 `tests/test_agent_graph.py` asserts the graph *topology* — that no edge routes
 around the guard node — rather than its behaviour.
+
+---
+
+## Decision records
+
+Each is cited from the code at the line it explains.
+
+| | Decision | Why it exists |
+|---|---|---|
+| [0001](docs/adr/0001-tenant-binding.md) | Tenant identity is bound in a closure, never a tool argument | Anything the model can name, it can be persuaded to change |
+| [0002](docs/adr/0002-sqlite-authorizer.md) | Materialise a per-tenant temp table; deny the base table unconditionally | The obvious temp-*view* design has a real bypass: a CTE named after the view impersonates it |
+| [0003](docs/adr/0003-langgraph-over-agent-executor.md) | A LangGraph state machine rather than a prebuilt agent loop | Three nodes are security controls, and a control belongs in the topology, not in a convention |
+| [0004](docs/adr/0004-postgres-parity.md) | SQLite stays the default; Postgres native RLS is the production shape | The per-session copy is right at 500 rows and wrong at five million |
+| [0005](docs/adr/0005-schema-introspection.md) | Derive the column allowlist from the catalog, not from hand-written lists | Three copies of one truth existed and nothing kept them in step |
+| [0006](docs/adr/0006-detach-the-source-database.md) | The agent's connection is a private database, not the data file | SQLite consults the authorizer for a join written with `ON` and not for one written with `USING` |
+
+Three of these exist because a first attempt was wrong. Without the record,
+the natural reaction to `db.py` is "why not just use a view, that would be
+simpler" — and 0002 is the reason not to.
 
 ---
 
