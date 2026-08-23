@@ -36,23 +36,31 @@ instructed not to.
 ## Repository layout
 
 ```
-agent.py                LangGraph state machine -- the application itself
-db.py                   layer 4 -- the boundary
-app.py                  Streamlit UI (thin; no security logic)
-employees.csv           1000 rows, 3 tenants, seeded
+agent.py                     LangGraph state machine -- the application itself
+db.py                   L4   the boundary: a connection holding one tenant's rows
+app.py                       Streamlit UI (thin; no security logic)
+employees.csv                1000 rows, 3 tenants, seeded
 
 secure_rls/
-  security/             principal, spec, sql_guard, output_guard, audit, gateway
-  tools/factory.py      the bound tool factory
-  rag/                  per-tenant Chroma collections
-  session.py            binds gateway + retriever + tools to one principal
+  session.py                 binds gateway + retriever + tools to one principal
+  tools/factory.py      L2   the tool contract -- no tool takes a tenant
+  rag/                       per-tenant Chroma collections, one per tenant
+  security/
+    principal.py        L1   who is asking; role -> column policy
+    gateway.py          L3   the single door to data; owns everything below
+    spec.py             L3   typed QuerySpec -> parameterised SQL
+    sql_guard.py        L3   model-written SQL -> sqlglot AST -> checked, rewritten
+    output_guard.py     L5   verifies rows against a privileged id set
+    audit.py            L5   hash-chained log of every access
+    layers.py           --   names which layer refused; enforces nothing
+    conversation.py     --   per-user transcripts, treated as tenant data
 
-evals/                  red-team + correctness suites, ablation, report
-tests/                  boundary, tool contract, gateway, RAG, graph topology
-docs/                   architecture, threat model, ADRs, agentic workflow
-.claude/                CLAUDE.md invariants, slash commands, security reviewer,
-                        pre-commit hook that blocks a tenant parameter
-.github/workflows/      ci, eval (leak-rate gate), deploy
+evals/                       red-team + correctness suites, ablation, report
+tests/                       boundary, tool contract, gateway, RAG, graph topology
+docs/                        architecture, threat model, ADRs, agentic workflow
+.claude/                     CLAUDE.md invariants, slash commands, security reviewer,
+                             pre-commit hook that blocks a tenant parameter
+.github/workflows/           ci, eval (leak-rate gate), deploy
 ```
 
 Start with `docs/threat-model.md`, then `db.py`, then
