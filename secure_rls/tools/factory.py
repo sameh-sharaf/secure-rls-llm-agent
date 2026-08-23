@@ -82,10 +82,28 @@ class ToolContext:
     retriever: Any | None = None  # TenantNotesRetriever, bound to the same principal
     artifacts: list[Artifact] = field(default_factory=list)
     rejections: list[str] = field(default_factory=list)
+    #: What each layer received and produced, for the Security tab.
+    #:
+    #: Observability only -- nothing here is consulted by any control, and
+    #: removing it changes no behaviour. It is recorded in this file rather
+    #: than inside `security/` on purpose: the tool factory is the one place
+    #: that sees both the model's raw arguments and the gateway's result, so
+    #: the trace can be assembled without giving a security module a second
+    #: job or a reason to hold render state.
+    layer_traces: list[dict] = field(default_factory=list)
+    #: The arguments the model actually emitted, set by the agent immediately
+    #: before it invokes a tool. LangChain validates against `args_schema`
+    #: *before* the tool body runs, so by the time the function sees its
+    #: kwargs they are already coerced -- enums resolved, defaults filled. That
+    #: is the layer-2 *output*; showing it as the input would hide the very
+    #: translation the trace exists to display.
+    raw_args: dict = field(default_factory=dict)
 
     def reset(self) -> None:
         self.artifacts.clear()
         self.rejections.clear()
+        self.layer_traces.clear()
+        self.raw_args = {}
 
 
 # ---------------------------------------------------------------- schemas ---
@@ -335,6 +353,51 @@ def _summarise(result: QueryResult, note: str = "") -> str:
     return "\n".join(lines)
 
 
+def _trace_layers(
+    context: ToolContext,
+    tool: str,
+    raw: dict,
+    validated: str | None = None,
+    result: QueryResult | None = None,
+    exc: Exception | None = None,
+) -> None:
+    """Record what each layer saw and produced for one tool call.
+
+    Shows the translation the layers perform, step by step: the JSON the model
+    emitted, the typed object it validated into, the SQL that compiled from
+    that, the rows, and the guard's verdict. When a layer refuses, the trace
+    stops at that layer and names it -- which is more useful than a green trace
+    with a refusal message stapled underneath.
+    """
+    entry: dict = {
+        "tool": tool,
+        "l2_in": context.raw_args or raw,
+        "l2_out": validated,
+        "refused_by": refusal_layer(exc) if exc is not None else None,
+        "reason": str(exc) if exc is not None else None,
+    }
+    if result is not None:
+        entry["l3_sql"] = result.sql
+        entry["l3_params"] = list(result.params or [])
+        entry["l3_rewrites"] = list(result.rewrites or [])
+        entry["l4_rows"] = result.row_count
+        entry["l5_verdict"] = result.verdict.summary if result.verdict else None
+    context.layer_traces.append(entry)
+
+
+def trace_layer_refusal(context: ToolContext, tool: str, raw: dict, exc: Exception) -> None:
+    """Record a call refused at layer 2, before the tool body ever ran.
+
+    LangChain validates arguments against `args_schema` and raises before
+    calling the function, so the tool itself never sees an invented field --
+    the agent's tool node does. This is the entry point for that case, so a
+    schema rejection appears in the trace beside the calls that got further.
+    """
+    context.raw_args = raw
+    _trace_layers(context, tool, raw, exc=exc)
+    context.raw_args = {}
+
+
 def refusal_layer(exc: Exception) -> str:
     """Which layer refused, as a short label for the trace and the UI."""
     layer = layer_of(exc)
@@ -375,7 +438,13 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
 
     # -- structured read ---------------------------------------------------
     def query_employees(**kwargs: Any) -> str:
-        args = QueryEmployeesArgs(**kwargs)
+        try:
+            args = QueryEmployeesArgs(**kwargs)
+        except Exception as exc:
+            # Refused at layer 2: the arguments never became a spec, so there
+            # is nothing downstream to trace.
+            _trace_layers(context, "query_employees", kwargs, exc=exc)
+            raise
         spec = QuerySpec(
             select=args.select,
             distinct=args.distinct,
@@ -390,12 +459,15 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
             descending=args.descending,
             limit=args.limit,
         )
+        summary = spec.model_dump_json(exclude_defaults=True)
         try:
             result = gateway.run_spec(spec)
         except Exception as exc:
             context.rejections.append(str(exc))
+            _trace_layers(context, "query_employees", kwargs, summary, exc=exc)
             return _explain_refusal(exc)
 
+        _trace_layers(context, "query_employees", kwargs, summary, result=result)
         context.artifacts.append(
             Artifact(
                 kind="table",
@@ -409,12 +481,15 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
 
     # -- SQL escape hatch --------------------------------------------------
     def run_sql(sql: str) -> str:
+        raw = {"sql": sql}
         try:
             result = gateway.run_sql(sql)
         except Exception as exc:
             context.rejections.append(str(exc))
+            _trace_layers(context, "run_sql", raw, sql, exc=exc)
             return _explain_refusal(exc)
 
+        _trace_layers(context, "run_sql", raw, sql, result=result)
         context.artifacts.append(
             Artifact(
                 kind="table",

@@ -483,9 +483,15 @@ class SecureAgent:
                 content = f"REFUSED: no such tool {name!r}."
                 trace.append(step("tool", f"{name} (unknown)", status="refused"))
             else:
+                # The arguments as the model wrote them, before LangChain
+                # coerces them against the schema -- see ToolContext.raw_args.
+                self.session.context.raw_args = dict(args)
                 try:
                     content = tool.invoke(args)
                 except Exception as exc:  # a schema violation, e.g. an invented field
+                    from secure_rls.tools.factory import trace_layer_refusal
+
+                    trace_layer_refusal(self.session.context, name, dict(args), exc)
                     # A raw Pydantic dump is a poor thing to hand a model that
                     # has one retry left, and a worse thing to show a user if it
                     # becomes the answer. Turn it into a sentence.
@@ -493,6 +499,8 @@ class SecureAgent:
                         f"REFUSED [L2 tool contract] (invalid arguments): "
                         f"{_explain_validation(exc, name, tool)}"
                     )
+                finally:
+                    self.session.context.raw_args = {}
                 sql = None
                 for artifact in self.session.context.artifacts:
                     if artifact.sql:

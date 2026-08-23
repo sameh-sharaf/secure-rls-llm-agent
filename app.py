@@ -15,6 +15,7 @@ implies is not authenticated.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -544,6 +545,7 @@ def render_security(session) -> None:
         st.markdown("**Result**")
         st.write(reply.answer)
         render_trace(reply.trace)
+        render_layer_trace(session)
         leaked = any(token in reply.answer for token in foreign)
         stopped_by = [s["layer"] for s in reply.trace if s.get("layer")]
         used_a_tool = bool(reply.tools_used)
@@ -565,6 +567,55 @@ def render_security(session) -> None:
             st.success("Answered within your own organisation. No leak.")
 
     render_layer_lab(session)
+
+
+def render_layer_trace(session) -> None:
+    """What each layer received and produced, for the calls this turn made.
+
+    The trace above says which steps ran. This says what they did to the
+    request -- the JSON the model wrote, the typed object it validated into,
+    the SQL that compiled from it, the rows, the guard's verdict. Most of the
+    design is invisible until you can see the same request in four shapes.
+    """
+    traces = getattr(session.context, "layer_traces", [])
+    if not traces:
+        st.caption(
+            "No tool ran, so no layer was reached. Nothing here to show -- which is "
+            "itself the weakest way a request can fail, because it depended on the "
+            "model declining rather than on a control."
+        )
+        return
+
+    st.markdown("**Layer by layer**")
+    for i, t in enumerate(traces, 1):
+        header = f"{i}. `{t['tool']}`" + (
+            f" — refused by {t['refused_by']}" if t.get("refused_by") else " — completed"
+        )
+        with st.expander(header, expanded=len(traces) == 1):
+            st.caption("L2 · tool contract — in: the JSON the model wrote")
+            st.code(json.dumps(t["l2_in"], indent=2, default=str), language="json")
+            if t.get("l2_out"):
+                st.caption("L2 · out: validated, defaults filled, values now typed")
+                st.code(str(t["l2_out"]), language="json")
+
+            if t.get("refused_by"):
+                st.error(f"Refused by **{t['refused_by']}** — {t.get('reason', '')}")
+                st.caption("Nothing downstream ran, so there is nothing further to show.")
+                continue
+
+            st.caption("L3 · query gateway — out: parameterised SQL")
+            st.code(t["l3_sql"], language="sql")
+            if t.get("l3_params"):
+                st.caption(f"bound parameters: {t['l3_params']}")
+            for rewrite in t.get("l3_rewrites") or []:
+                st.caption(f"policy applied: {rewrite}")
+
+            st.caption("L4 · database boundary — out: rows, from this tenant's slice")
+            st.code(f"{t['l4_rows']} row(s) returned", language="text")
+
+            st.caption("L5 · output guard — verdict")
+            st.code(t.get("l5_verdict") or "n/a", language="text")
+
 
 
 # ------------------------------------------------------------------ the lab

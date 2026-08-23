@@ -271,3 +271,53 @@ def test_a_bare_series_object_is_accepted_by_the_chart_tool() -> None:
     args = PlotArgs(x="department", series={"metric": "avg", "column": "salary"})
     assert len(args.series) == 1
     assert args.series[0].metric == "avg"
+
+
+# ------------------------------------------------------- the layer trace ---
+# Observability for the Security tab: what each layer received and produced.
+# Nothing here is consulted by a control, so these tests pin that it stays
+# accurate rather than that it stays present.
+
+
+def test_the_layer_trace_records_a_completed_call(context: ToolContext) -> None:
+    tools = {t.name: t for t in build_tools(context)}
+    context.reset()
+    tools["query_employees"].invoke({"select": ["name"], "limit": 2})
+
+    assert len(context.layer_traces) == 1
+    t = context.layer_traces[0]
+    assert t["refused_by"] is None
+    assert "FROM employees" in t["l3_sql"]
+    assert t["l4_rows"] == 2
+    assert t["l5_verdict"]
+
+
+def test_the_layer_trace_stops_at_the_refusing_layer(context: ToolContext) -> None:
+    """A refused call must not carry SQL or rows it never produced."""
+    tools = {t.name: t for t in build_tools(context)}
+    context.reset()
+    tools["run_sql"].invoke({"sql": "SELECT * FROM employees_base"})
+
+    t = context.layer_traces[0]
+    assert t["refused_by"] == "L3 query gateway"
+    assert "l3_sql" not in t and "l4_rows" not in t
+
+
+def test_the_trace_never_carries_a_tenant(context: ToolContext) -> None:
+    """It is rendered in the UI, so it is an output like any other."""
+    tools = {t.name: t for t in build_tools(context)}
+    context.reset()
+    tools["query_employees"].invoke({"select": ["name"], "limit": 2})
+    blob = json.dumps(context.layer_traces, default=str).lower()
+    for forbidden in ("tenant", "employees_base", "beta", "gamma"):
+        assert forbidden not in blob, forbidden
+
+
+def test_reset_clears_the_trace(context: ToolContext) -> None:
+    """Traces are per turn; one question must not render another's."""
+    tools = {t.name: t for t in build_tools(context)}
+    tools["query_employees"].invoke({"select": ["name"], "limit": 1})
+    assert context.layer_traces
+    context.reset()
+    assert context.layer_traces == []
+    assert context.raw_args == {}
