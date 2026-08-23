@@ -30,6 +30,7 @@ instructed not to.
 - [Testing](#testing)
 - [Decision records](#decision-records)
 - [Challenges & limitations](#challenges--limitations)
+- [Future work](#future-work)
 - [Time spent](#time-spent)
 
 ---
@@ -569,6 +570,58 @@ Each is cited from the code at the line it explains.
   and has no `tenant_id` column, so layer 3 has no tenant predicate to inject —
   every rejection it makes would also be made one layer down. It earns its place
   for actionable error messages, for k-anonymity, and for legible audit events.
+
+---
+
+## Future work
+
+- **Push enforcement into the engine.** ADR-0004 scopes a Postgres profile:
+  `CREATE POLICY ... USING (tenant_id = current_setting('app.tenant_id'))` with
+  `FORCE ROW LEVEL SECURITY` and a non-owner role. The point is not to run
+  Postgres — it is to run `tests/test_boundary.py` and `evals/redteam.yaml`
+  unchanged against both backends, showing the property belongs to the
+  architecture rather than to one SQLite technique. The same shape exists as
+  Snowflake row access policies and Unity Catalog row filters, where the
+  application stops being trusted at all.
+
+- **More than one relation.** ADR-0005 carries the design: a registry of exposed
+  relations, one tenant-scoped temp table materialised per entry, `Column`
+  becoming per-relation, and joins permitted only between exposed relations. Not
+  built because the dataset has one table, and a registry with one entry
+  demonstrates nothing the current code does not.
+
+- **Widen the query surface.** Window functions, `CASE` expressions, date
+  bucketing and output aliases are all refused today, so the agent cannot rank
+  within a group or compare one period against another. Each is an allowlist
+  entry and an AST check rather than a change to the boundary.
+
+- **Inference protection.** The k-anonymity floor is implemented and off
+  (`ENFORCE_MIN_COHORT`). Turning it on refuses cohorts below five, but a
+  patient analyst can still narrow an aggregate onto one person across several
+  questions. Query budgets and differential privacy are the real answers, and
+  both are larger than a flag. (threat model, rows 15–16)
+
+- **Tool-calling reliability.** `llama3.1:8b` answered 39% of graded questions
+  correctly against gemma's 94%, and the gap is not the tool contract: it failed
+  to call a tool at all on 7 of 18 questions, where qwen2.5 — a smaller model —
+  called one on 17 of 18. The boundary is unaffected and the leak rate stayed at
+  0.00%, so this is answer quality, not safety. It decides how small a model
+  this can run on, which matters for cost.
+
+- **Richer identity.** Entra ID group claims mapping to row filters;
+  on-behalf-of tokens, so a warehouse audit log records the human rather than a
+  service principal; purpose-based access, where the same person and the same
+  rows carry different permitted uses.
+
+- **Scale the AI surface.** One Chroma collection per tenant does not reach ten
+  thousand tenants. Every cache, prompt cache and conversation checkpoint is a
+  leak channel needing a tenant-scoped key. A guardrail model can filter, but
+  never bound.
+
+- **Operate it.** Audit to a SIEM; alert on refusal spikes and canary hits; track
+  refusal rate as a product metric, since over-blocking is a failure mode.
+  Continuous red teaming that grows with every new tool, and human-in-the-loop
+  as a graph `interrupt` the moment a write capability arrives.
 
 ---
 
