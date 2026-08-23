@@ -139,13 +139,24 @@ department?"*. Every value below is a real capture from a run.
 ```
 select        = [Column.SALARY]        # strings are now enum members
 metrics       = ['max']
-metric_column = salary                 # defaulted; the model never said it
+metric_column = salary                 # inferred: the one numeric column in `select`
 filters       = [FilterArg(column=Column.DEPARTMENT, op=Operator.EQ,
                            value='Operations')]
 limit         = 100                    # defaulted
 
 a "tenant_id" key here would be a ValidationError -- the field does not exist
 ```
+
+Three things happen to one request here, and they are the whole of what L2 is.
+A field the model **invents** is rejected. A field it **omits** takes a
+server-side default it cannot influence — `limit`. And a field it omits that
+*cannot* be defaulted honestly is **resolved or refused**: `metric_column` is
+inferred here only because `select` names exactly one numeric column. Asked for
+an average by department, with no measure named, the call is refused and the
+reason goes back to the planner to revise.
+
+That last one used to be a silent default to `salary`, which quietly answered
+the wrong question — see [Challenges](#challenges).
 
 **L3** (`security/spec.py`) authorises the request, then compiles it:
 
@@ -498,6 +509,18 @@ filter without copying -- Postgres policies, Snowflake row access policies,
 Unity Catalog row filters. ADR-0004 sketches the Postgres profile. At this
 scale the copy is the right trade; at production scale the right move is to
 stop emulating row-level security and use the engine's own.
+
+**A default can answer the wrong question confidently.** `metric_column` — the
+column an aggregate applies to — defaulted to `salary` whenever the model left
+it out. Asked for the average performance score by department, a model that
+named the metric and forgot the column got `AVG(salary)`: correctly computed,
+correctly scoped to the tenant, and not the question asked. The only thing
+standing between that and a confident wrong number was the result column being
+named `avg_salary`, which is a naming convention doing a validator's job. The
+field is now resolved or refused — inferred from `select` when that names
+exactly one numeric column, and otherwise a validation error that the existing
+retry loop feeds back to the planner. Guessing is cheaper than a round trip
+only until the guess is wrong.
 
 **`COUNT(*)` contains a `Star` node.** A naive "reject any star" check in the
 sqlglot guard rejected legitimate counts. Caught by a test, not by review.

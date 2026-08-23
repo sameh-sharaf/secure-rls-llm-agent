@@ -120,6 +120,42 @@ def introspect_types(db_path: Path = DB_PATH) -> dict[str, str]:
     return {r[1]: (r[2] or "TEXT") for r in rows if r[1] != TENANT_COLUMN}
 
 
+def numeric_columns(db_path: Path = DB_PATH) -> frozenset[str]:
+    """Columns an aggregate can meaningfully be computed over.
+
+    Derived from the declared types rather than listed, for the same reason
+    the allowlist is (invariant 8): a hand-written set is a fourth copy of one
+    truth. A column added as INTEGER or REAL becomes aggregatable without a
+    code change, and one added as TEXT does not.
+
+    Used by the tool contract to work out which column an aggregate applies
+    to when the model named a measure but not a column. It is a usability
+    input, not a control -- nothing here widens what a role may read.
+
+    The primary key is excluded. `user_id` is an INTEGER and `AVG(user_id)` is
+    arithmetic on an identifier, so offering it as a candidate invites a
+    meaningless query. That exclusion is read from the catalog too, rather than
+    naming the column here -- invariant 8 applies to this list as much as to
+    the allowlist.
+    """
+    if not db_path.exists():
+        return frozenset()
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(f"PRAGMA table_info({BASE_TABLE})").fetchall()
+    except sqlite3.DatabaseError:
+        return frozenset()
+    finally:
+        conn.close()
+    return frozenset(
+        r[1]
+        for r in rows
+        if r[1] != TENANT_COLUMN
+        and not r[5]  # pk flag
+        and (r[2] or "").upper().startswith(("INT", "REAL", "NUM", "DEC", "FLOA", "DOUB"))
+    )
+
+
 #: Resolved once at import. Add a column to the table and it appears here, in
 #: the model's vocabulary and in the SQL guard together -- there is nothing to
 #: keep in step by hand.

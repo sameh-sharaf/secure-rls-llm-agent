@@ -321,3 +321,79 @@ def test_reset_clears_the_trace(context: ToolContext) -> None:
     context.reset()
     assert context.layer_traces == []
     assert context.raw_args == {}
+
+
+# --------------------------------------------------------- metric_column ---
+# `metric_column` used to default to `salary` unconditionally, so a model that
+# named a metric and forgot the column got a correctly-computed answer to a
+# question nobody asked. These pin the resolve-or-refuse rule that replaced it.
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [
+        # Explicit always wins.
+        ({"metrics": ["avg"], "metric_column": "performance_score"}, "performance_score"),
+        # Exactly one numeric column in `select`: nothing to guess about.
+        ({"metrics": ["max"], "select": ["salary"]}, "salary"),
+        ({"metrics": ["avg"], "select": ["performance_score"]}, "performance_score"),
+        # Non-numeric columns in `select` are not candidates, so one numeric
+        # column beside them is still unambiguous.
+        ({"metrics": ["avg"], "select": ["name", "salary"]}, "salary"),
+    ],
+    ids=["explicit", "select_salary", "select_score", "select_mixed"],
+)
+def test_metric_column_is_resolved_when_it_is_unambiguous(kwargs: dict, expected: str) -> None:
+    assert QueryEmployeesArgs(**kwargs).metric_column.value == expected
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # The case that motivated this: a measure named, no column, and a
+        # grouping column that is not the thing being measured.
+        {"metrics": ["avg"], "group_by": ["department"]},
+        # Nothing at all to infer from.
+        {"metrics": ["sum"]},
+        # `select` names a dimension, not a measure.
+        {"metrics": ["avg"], "select": ["department"]},
+        # Two numeric candidates is ambiguous, not a coin toss.
+        {"metrics": ["avg"], "select": ["salary", "performance_score"]},
+        # A count alongside a real aggregate does not excuse the aggregate.
+        {"metrics": ["count", "avg"], "group_by": ["department"]},
+    ],
+    ids=["group_by_only", "bare_metric", "dimension_only", "ambiguous", "count_plus_avg"],
+)
+def test_an_aggregate_without_a_column_is_refused_rather_than_guessed(kwargs: dict) -> None:
+    with pytest.raises(ValidationError) as exc:
+        QueryEmployeesArgs(**kwargs)
+    assert "metric_column" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"metrics": ["count"]},
+        {"metrics": ["count"], "group_by": ["department"]},
+        {"select": ["name"]},
+        {},
+    ],
+    ids=["count", "count_grouped", "no_metrics", "empty"],
+)
+def test_a_count_needs_no_metric_column(kwargs: dict) -> None:
+    """COUNT compiles to COUNT(*), so there is no column to demand."""
+    assert QueryEmployeesArgs(**kwargs).metric_column is None
+
+
+def test_a_refused_aggregate_names_the_columns_it_would_accept() -> None:
+    """The message is read by the model, which gets one retry to act on it."""
+    with pytest.raises(ValidationError) as exc:
+        QueryEmployeesArgs(metrics=["avg"], group_by=["department"])
+    # The validator's own message, not Pydantic's rendering of it: the latter
+    # appends a dump of the input, which would make any assertion here pass for
+    # the wrong reason.
+    message = exc.value.errors()[0]["msg"]
+    assert "salary" in message and "performance_score" in message
+    # The grouping column is not a candidate, and neither is the primary key.
+    assert "department" not in message
+    assert "user_id" not in message

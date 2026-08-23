@@ -29,8 +29,9 @@ from typing import Any, Literal
 
 import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from db import numeric_columns
 from secure_rls.security.gateway import CohortTooSmall, QueryGateway, QueryResult
 from secure_rls.security.layers import layer_of
 from secure_rls.security.output_guard import LeakDetected
@@ -172,8 +173,13 @@ class QueryEmployeesArgs(_Base):
             "without being any one person's figure."
         ),
     )
-    metric_column: Column = Field(
-        default=Column.SALARY, description="Column the aggregates apply to"
+    metric_column: Column | None = Field(
+        default=None,
+        description=(
+            "Column the aggregates apply to. Required whenever `metrics` holds "
+            "anything but `count`, unless `select` names exactly one numeric "
+            "column to infer it from."
+        ),
     )
     filters: list[FilterArg] = Field(default_factory=list, description="Conditions to apply")
     group_by: list[Column] = Field(default_factory=list, description="Columns to group by")
@@ -192,6 +198,61 @@ class QueryEmployeesArgs(_Base):
     _accept_a_bare_value = field_validator(
         "select", "metrics", "filters", "group_by", mode="before"
     )(_one_or_many)
+
+    @model_validator(mode="after")
+    def _resolve_metric_column(self) -> QueryEmployeesArgs:
+        """An aggregate must say what it aggregates. Never guess.
+
+        This field used to default to `salary` unconditionally, which is a
+        wrong-answer generator: asked for the average performance score by
+        department, a model that named the metric and forgot the column got
+        `AVG(salary)` back, correctly computed and answering a question nobody
+        asked. Only the output being named `avg_salary` stood between that and
+        a confident wrong number, which is a naming convention doing a
+        validator's job.
+
+        So the column is now resolved, or the call is refused:
+
+        * `count` needs no column -- it compiles to `COUNT(*)` -- so a
+          count-only request is complete without one;
+        * an explicit `metric_column` is taken as given;
+        * otherwise it is inferred from `select`, but only when that names
+          exactly one numeric column, which is the case where there is nothing
+          to guess about;
+        * anything else is a validation error naming the candidates.
+
+        The refusal is not a dead end. `_run_tools` turns it into `REFUSED
+        [L2 tool contract]`, `_after_guard` routes it to `retry`, and the
+        planner sees the reason and revises -- the same self-correction loop a
+        policy rejection uses (ADR-0003). One round trip is cheaper than a
+        plausible wrong answer.
+        """
+        if self.metric_column is not None:
+            return self
+        needs_column = [m for m in self.metrics if m != "count"]
+        if not needs_column:
+            return self
+
+        numeric = numeric_columns()
+        candidates = [c for c in self.select if c.value in numeric]
+        if len(candidates) == 1:
+            self.metric_column = candidates[0]
+            return self
+
+        offer = ", ".join(sorted(numeric)) or "none available"
+        raise ValueError(
+            f"metrics {needs_column} need a `metric_column` saying which column "
+            f"to aggregate"
+            + (
+                f"; `select` names {len(candidates)} numeric columns, so it is "
+                f"ambiguous"
+                if candidates
+                else ""
+            )
+            # No trailing period: `_explain_validation` joins this with its own
+            # sentence about the tool's parameters.
+            + f". Numeric columns: {offer}"
+        )
 
 
 class RunSqlArgs(_Base):
@@ -481,7 +542,11 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
             select=args.select,
             distinct=args.distinct,
             metrics=[
-                Metric(agg=Aggregate(m), column=args.metric_column) for m in args.metrics
+                # `metric_column` is None only when every metric is a count, and
+                # COUNT compiles to COUNT(*) with the column ignored -- see
+                # `_resolve_metric_column`, which refuses every other case.
+                Metric(agg=Aggregate(m), column=args.metric_column or Column.USER_ID)
+                for m in args.metrics
             ],
             filters=[
                 Predicate(column=f.column, op=f.op, value=f.value) for f in args.filters
