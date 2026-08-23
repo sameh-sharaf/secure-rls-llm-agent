@@ -159,16 +159,9 @@ limit         = 100                    # defaulted
 a "tenant_id" key here would be a ValidationError -- the field does not exist
 ```
 
-Three things happen to one request here, and they are the whole of what L2 is.
-A field the model **invents** is rejected. A field it **omits** takes a
-server-side default it cannot influence — `limit`. And a field it omits that
-*cannot* be defaulted honestly is **resolved or refused**: `metric_column` is
-inferred here only because `select` names exactly one numeric column. Asked for
-an average by department, with no measure named, the call is refused and the
-reason goes back to the planner to revise.
-
-That last one used to be a silent default to `salary`, which quietly answered
-the wrong question — see [Challenges & limitations](#challenges--limitations).
+Strings become enum members, and a field the model invents is a
+`ValidationError` rather than an ignored key. `metric_column` was not sent — it
+is resolved from `select`, or the call is refused.
 
 **L3** (`security/spec.py`) authorises the request, then compiles it:
 
@@ -177,28 +170,12 @@ SELECT MAX(salary) AS max_salary FROM employees WHERE department = ? LIMIT ?
 -- params: ['Operations', 100]
 ```
 
-`"Operations"` is a **bound parameter**, not part of the SQL text. The statement
-handed to SQLite ends at `department = ?`; the value travels beside it and is
-never parsed as SQL.
+Columns and operators come from enums; `"Operations"` is a bound parameter, so
+no string the model produced reaches the SQL text. There is no tenant filter
+because there are no other tenants to exclude.
 
-Binding is a *role* control here, not a tenant one. The tenant boundary does not
-depend on it: splice the value in instead, and a `UNION SELECT ... FROM
-employees_base` still gets `no such table`, while `' OR 1=1 --` still reads only
-acme's own rows. What binding protects is the column policy, which is checked
-against the *spec* above rather than against the finished SQL. Spliced into the
-statement above, the value `Operations' UNION SELECT salary FROM employees --`
-returns 209 individual salaries, from 30,000 up to the 999,999 canary. For an
-`analyst` that is an individual-salary read the mask never sees, because the
-spec it checked names `salary` only inside `MAX()`.
-
-Values are the only position where this arises. SQL binds values, never
-identifiers — there is no `SELECT ? FROM ?` — so `column` and `op` come from
-closed enums and are safe to interpolate, and values are bound. Between the two,
-no string the model produced reaches the SQL text.
-
-There is no tenant filter because there are no other tenants to exclude. The
-*same spec* as `acme_analyst` is refused here instead -- that role may not read
-an individual salary, and is pointed at `p90`, a median or an average.
+The *same spec* as `acme_analyst` is refused here instead -- that role may not
+read an individual salary, and is pointed at `p90`, a median or an average.
 
 **L4** (`db.py`) runs it against a connection holding 500 acme rows:
 
