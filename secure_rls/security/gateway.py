@@ -329,7 +329,7 @@ class QueryGateway:
 
         Every result in this class goes through here rather than calling the
         guard directly, so there is one place the switch is read. A second call
-        site that reached `self._guard` straight would be a control that some
+        site reaching `self._guard` directly would be a control that some
         results skip -- which is the shape of invariant 5b, applied to the
         guard instead of the mask.
         """

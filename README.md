@@ -40,7 +40,7 @@ Five layers. Layer 4 is the boundary; the rest are defence in depth.
 
 | | Layer | Files | In one line | What it actually does |
 |---|---|---|---|---|
-| | *the model* | — | writes JSON, or SQL | **Not a layer, and not trusted.** It is outside all five: it produces the request, and L2 is the wall that request hits rather than the step that makes it. |
+| | *the model* | — | writes JSON, or SQL | **Not a layer, and not trusted.** It sits outside all five: it produces the request, and L2 is the first thing that request meets. The model is never a step in the enforcement, only the thing being enforced against. |
 | **L1** | Identity & role | `security/principal.py` | who you are, and what your role may see | `Principal` built at login from the server-side session. Never a tool argument, never in a prompt as something rewritable, never round-tripped through the browser. Also holds the role's column policy. |
 | **L2** | Tool contract | `tools/factory.py` | the schema that constrains what the model can say | Tools are closures over a gateway built from the principal. **No tool takes a tenant parameter.** Pydantic schemas set `extra="forbid"`, so an invented field is an error rather than an ignored key. |
 | **L3** | Query gateway | `security/gateway.py`<br>`security/spec.py`<br>`security/sql_guard.py` | compiles the JSON into SQL, or validates SQL the model wrote | Typed specs compile to parameterised SQL; model-written SQL is validated on the sqlglot AST, rewritten for row limits and regenerated from the tree. Every read goes through the gateway — tools never hold a connection. A k-anonymity floor is implemented and off by default. |
@@ -198,7 +198,7 @@ employees.csv                1000 rows, 3 tenants, seeded
 secure_rls/
   session.py                 binds gateway + retriever + tools to one principal
   tools/factory.py      L2   the tool contract -- no tool takes a tenant
-  rag/                       per-tenant Chroma collections, one per tenant
+  rag/                       one Chroma collection per tenant
   security/
     principal.py        L1   who is asking; role -> column policy
     gateway.py          L3   owns the connection; every read goes through it
@@ -390,7 +390,7 @@ three cases because of them. The earlier run (llama 90% / qwen 94% / gemma
 100%) was against a suite that did not yet contain the cases these models fail
 — which is the correct direction for a security suite to move.
 
-Answer accuracy spans 72% to 100% and latency spans 8×, while the cross-tenant
+Answer accuracy spans 72% to 100% and latency spans 19×, while the cross-tenant
 leak rate is 0.00% for all three. The tenant boundary sits below the model, so
 swapping a 26B for a 7B changes answer quality and speed and *nothing about
 safety*. Model choice is therefore a quality-and-latency decision rather than a
@@ -463,7 +463,7 @@ python -m evals.report evals/results/*.json
 ## Testing
 
 ```bash
-python -m pytest tests/ -q      # 394 tests, no model required
+python -m pytest tests/ -q      # 406 tests, no model required
 ```
 
 `tests/test_boundary.py` is the central one: a fixed corpus of smuggling

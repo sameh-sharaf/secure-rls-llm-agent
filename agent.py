@@ -643,14 +643,12 @@ class SecureAgent:
             # asked for, or the policy reason they were refused.
             text = _fallback_from_tools(state)
         if not text:
-            # Distinguish "a tool ran and I cannot summarise it" from "no tool
-            # ran at all". The old single message claimed "I ran the query"
-            # in both cases, which is untrue in the second and sends the user
-            # looking for a result that does not exist.
-            # `messages` spans the conversation, so scoping this to the turn is
-            # not optional: an earlier turn's tool call made this claim "I ran
-            # the query" on a turn that ran nothing, and sent the user looking
-            # for a result that was never produced.
+            # Distinguish "a tool ran and I cannot summarise it" from "no
+            # tool ran at all". A single message claiming "I ran the query" is
+            # untrue in the second case and sends the user looking for a result
+            # that does not exist. Scoping the check to this turn is not
+            # optional either: `messages` spans the conversation, so an earlier
+            # turn's tool call once made that claim on a turn that ran nothing.
             ran_a_tool = ran_any_tool
             text = (
                 "I ran the query but could not phrase a summary. The result is shown below."

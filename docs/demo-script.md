@@ -1,4 +1,4 @@
-# Demo run of show — 60 minutes
+# Demo script — 60 minutes
 
 Rehearse against a clock. The single most common failure in this format is
 spending twenty minutes on setup and reaching the security argument with eight
@@ -63,7 +63,7 @@ defence in depth; **L4 is the boundary**. Repo tour in 90 seconds.
 
 ## 35–45 · Agentic tooling
 
-1. `CLAUDE.md` — the seven invariants, and the "things that will bite you" list.
+1. `CLAUDE.md` — the eight invariants, and the "things that will bite you" list.
 2. **The hook demo.** Add `tenant_id: str = Field(...)` to `QueryEmployeesArgs`,
    `git add`, `git commit`. It is refused twice: once on the diff pattern, once
    on three failing contract tests. Revert.

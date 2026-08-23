@@ -13,9 +13,10 @@ provides no count of its own. Nothing here calls it -- token accounting comes
 from Ollama -- and neither `transformers` nor `torch` appears in
 `requirements.txt`.
 
-They are in this developer's environment anyway, so the optional import
-succeeds, and `transformers` pulls in `torch`. Measured: 27 of the 34.7 seconds
-it took to `import agent`, to define a tokenizer that is never constructed. CI
+They are present in most local development environments anyway, so the
+optional import succeeds, and `transformers` pulls in `torch`. Measured: 27
+of the 34.7 seconds it took to `import agent`, to define a tokenizer that is
+never constructed. CI
 installs only `requirements.txt` and so never paid it, which is exactly why it
 went unnoticed -- the slow path was the local one.
 
@@ -29,9 +30,9 @@ cheap.
 
 Scoped deliberately. The obvious version -- assign `sys.modules["transformers"]
 = None` and leave it -- makes the module permanently unimportable for anything
-else in the process, which is a rude thing for a library to do to its host. Here
-the block lasts for one import and is removed in a `finally`, so anything that
-genuinely wants `transformers` can still have it.
+else in the process, which is not a side effect one module should impose on
+the rest of the program. Here the block lasts for one import and is removed in
+a `finally`, so anything that genuinely wants `transformers` can still have it.
 
 Importing this module performs the work, so that callers need only an import
 line and not a statement wedged between their imports -- which would put every
@@ -79,9 +80,9 @@ def prepare() -> bool:
     try:
         __import__(_TARGET)
     except ImportError:
-        # langchain is not installed, or its layout changed. Not our problem to
-        # solve here -- the real import downstream will raise where it means
-        # something.
+        # langchain is not installed, or its layout changed. Nothing to do
+        # about that here -- the real import downstream will raise where the
+        # failure is meaningful.
         return False
     finally:
         if hide:

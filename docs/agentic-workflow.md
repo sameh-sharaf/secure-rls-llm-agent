@@ -9,7 +9,7 @@ the division of labour rather than vague about it.
 
 | Artefact | Purpose |
 |---|---|
-| `CLAUDE.md` | Seven security invariants the agent reads every session, plus a "things that will bite you" list of framework hazards discovered during the build |
+| `CLAUDE.md` | Eight security invariants the agent reads every session, plus a "things that will bite you" list of framework hazards discovered during the build |
 | `.claude/commands/newtool.md` | Scaffolds a tool with a bound gateway, a forbidding schema, a unit test **and** a red-team case — all four, because a tool without its attack case does not merge |
 | `.claude/commands/redteam.md` | Generates new adversarial cases, with explicit instruction not to write rephrasings of existing ones |
 | `.claude/agents/security-reviewer.md` | Reviews a diff against the threat model, ordered by severity, and required to describe a concrete attack for each finding |

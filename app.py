@@ -121,10 +121,10 @@ def stale_modules() -> list[str]:
 
 STATUS_ICON = {"ok": "🟢", "refused": "🟡", "blocked": "🔴", "info": "⚪"}
 
-# Streamlit's built-in busy indicators animate a rotating set of emoji (the
-# running man and friends) in the top-right status widget and inside
-# `st.spinner`. On a page about row-level security they read as noise, and on a
-# 30-second model call they are on screen for a long time. Replaced with a
+# Streamlit's built-in busy indicators animate a rotating set of emoji in
+# the top-right status widget and inside `st.spinner`. On a page about
+# row-level security they read as noise, and on a 30-second model call they
+# are on screen for a long time. Replaced with a
 # plain rotating ring: the status widget is hidden, and any icon Streamlit puts
 # inside a spinner is swapped for a CSS-drawn circle.
 #

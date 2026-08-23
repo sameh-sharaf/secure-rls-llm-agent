@@ -5,8 +5,8 @@ principal, in one place. That is deliberate: the gateway, the retriever and the
 tools must all be bound to the *same* identity, and a caller that wires them up
 by hand can bind two of the three and leave the third pointing somewhere else.
 
-If you find yourself constructing a `QueryGateway` or a `TenantNotesRetriever`
-outside this module, that is the smell.
+Constructing a `QueryGateway` or a `TenantNotesRetriever` outside this module
+is the mistake this function exists to prevent.
 """
 
 from __future__ import annotations

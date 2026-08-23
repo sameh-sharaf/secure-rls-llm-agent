@@ -189,7 +189,7 @@ class ConversationStore:
         """This principal's own turns, oldest first.
 
         Filtered on tenant, username *and* role. The role clause is the one
-        that is easy to leave out and expensive to leave out: without it, a
+        that is easiest to forget and costliest to forget: without it, a
         demoted admin replays answers containing data their current role may
         not see.
         """

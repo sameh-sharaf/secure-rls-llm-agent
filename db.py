@@ -274,8 +274,9 @@ def _make_authorizer(tenant: str):
             # `dbname` is "temp" for ordinary column reads but None for reads
             # that name no column -- COUNT(*) is the common case. Both are
             # accepted for AGENT_TABLE, which is safe because the main database
-            # contains no relation of that name; `_assert_no_shadow_relation`
-            # enforces that rather than assuming it.
+            # contains no relation of that name;
+            # `_assert_nothing_reachable_but_the_agent_table` enforces that
+            # rather than assuming it.
             if arg1 == AGENT_TABLE and dbname in ("temp", None):
                 return sqlite3.SQLITE_OK
             return sqlite3.SQLITE_DENY
