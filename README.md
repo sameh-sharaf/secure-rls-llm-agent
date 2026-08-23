@@ -44,7 +44,7 @@ L1  security/principal.py    who you are, and what your role may see
 L2  tools/factory.py         the schema that constrains what the model can say
 L3  security/spec.py         compiles that JSON into SQL
     security/sql_guard.py    ...or validates SQL the model wrote itself
-    security/gateway.py      the single door both paths go through
+    security/gateway.py      every read goes through this one object
 L4  db.py                    a connection holding one tenant's rows, nothing else
 L5  security/output_guard.py checks the rows on the way out
     security/audit.py        records what happened, hash-chained
@@ -218,7 +218,7 @@ secure_rls/
   rag/                       per-tenant Chroma collections, one per tenant
   security/
     principal.py        L1   who is asking; role -> column policy
-    gateway.py          L3   the single door to data; owns everything below
+    gateway.py          L3   owns the connection; every read goes through it
     spec.py             L3   typed QuerySpec -> parameterised SQL
     sql_guard.py        L3   model-written SQL -> sqlglot AST -> checked, rewritten
     output_guard.py     L5   verifies rows against a privileged id set
