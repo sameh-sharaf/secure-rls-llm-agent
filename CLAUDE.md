@@ -61,6 +61,16 @@ project exists to demonstrate.
    gateway's percentile branch compiles its own spec and had to be given the
    call explicitly.
 
+5e. **Never substitute a value the caller did not supply.** No default
+   `metric_column`, no default `Metric.column`, no silently dropped `distinct`,
+   no bare column projected beside an ungrouped aggregate. Each of those turned
+   "the caller did not say" into "the caller said this" and produced a
+   confident answer to a question nobody asked -- which a leak-rate metric will
+   never catch, because the rows were correctly scoped the whole time. Resolve
+   it when exactly one reading exists, and refuse otherwise: the planner gets
+   the reason and revises (ADR-0003), and one round trip is cheaper than a
+   plausible wrong number.
+
 6. **Every new tool needs a red-team case** in `evals/redteam.yaml` before it
    merges, and a unit test asserting its schema carries no tenant parameter.
 

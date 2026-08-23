@@ -236,7 +236,15 @@ class QueryEmployeesArgs(_Base):
         numeric = numeric_columns()
         candidates = [c for c in self.select if c.value in numeric]
         if len(candidates) == 1:
+            # Inference *moves* the column out of `select` rather than copying
+            # it. `select=[salary], metrics=[max]` means "the maximum salary",
+            # not "salary, and also its maximum" -- and leaving it in both
+            # places compiles to `SELECT salary, MAX(salary)`, a bare column
+            # beside an ungrouped aggregate, which SQLite fills from a row of
+            # its choosing. QuerySpec refuses that shape outright; consuming
+            # the column here is what stops the inference from building it.
             self.metric_column = candidates[0]
+            self.select = [c for c in self.select if c != self.metric_column]
             return self
 
         offer = ", ".join(sorted(numeric)) or "none available"
@@ -542,10 +550,12 @@ def build_tools(context: ToolContext) -> list[BaseTool]:
             select=args.select,
             distinct=args.distinct,
             metrics=[
-                # `metric_column` is None only when every metric is a count, and
-                # COUNT compiles to COUNT(*) with the column ignored -- see
-                # `_resolve_metric_column`, which refuses every other case.
-                Metric(agg=Aggregate(m), column=args.metric_column or Column.USER_ID)
+                # Passed through as-is, including None. `Metric` requires a
+                # column for everything but COUNT, and `_resolve_metric_column`
+                # has already refused every case where one is missing -- so
+                # there is nothing here to substitute, and substituting would
+                # be the bug this pair of checks exists to prevent.
+                Metric(agg=Aggregate(m), column=args.metric_column)
                 for m in args.metrics
             ],
             filters=[

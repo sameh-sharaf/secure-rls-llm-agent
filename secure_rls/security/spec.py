@@ -15,7 +15,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from db import AGENT_COLUMNS
 from secure_rls.security.layers import Layer, tag
@@ -171,8 +171,30 @@ class Metric(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     agg: Aggregate
-    column: Column = Column.USER_ID
+    #: The column being aggregated. `None` only for COUNT, which compiles to
+    #: COUNT(*) and names no column at all.
+    #:
+    #: This used to default to `user_id`, which meant a metric built without a
+    #: column silently became an aggregate over an identifier rather than an
+    #: error. A default here is the same mistake `metric_column` made one layer
+    #: up: it converts "the caller did not say" into "the caller said this",
+    #: and the result is a number that answers a question nobody asked.
+    column: Column | None = None
     alias: str | None = None
+
+    @model_validator(mode="after")
+    def _an_aggregate_must_say_what_it_aggregates(self) -> Metric:
+        """Fail closed: no column, no aggregate -- except COUNT, which needs none.
+
+        The tool contract already resolves or refuses `metric_column` before a
+        spec is built (`_resolve_metric_column` in tools/factory.py), and that
+        is where the useful error message and the model's retry live. This is
+        the backstop for every other caller: the gateway's percentile path, the
+        evals, and anything added later that builds a spec by hand.
+        """
+        if self.agg is not Aggregate.COUNT and self.column is None:
+            raise ValueError(f"{self.agg.value} needs a column; only count may omit one")
+        return self
 
     def sql(self) -> str:
         if self.agg.value in GATEWAY_COMPUTED:
@@ -212,6 +234,64 @@ class QuerySpec(BaseModel):
     order_by: Column | None = None
     descending: bool = True
     limit: int = Field(default=DEFAULT_ROW_LIMIT, ge=1, le=MAX_ROW_LIMIT)
+
+    @model_validator(mode="after")
+    def _distinct_and_metrics_are_two_different_questions(self) -> QuerySpec:
+        """`distinct` with `metrics` is ambiguous, so it is refused rather than dropped.
+
+        The compiler used to silently ignore `distinct` whenever a metric was
+        present -- `SELECT DISTINCT` became plain `SELECT` -- and the result was
+        a wrong answer rather than a refusal. Asked for the number of distinct
+        departments, a model sending `select=[department], distinct=True,
+        metrics=[count]` got back `department = Engineering; count_rows = 500`:
+        one arbitrary department beside the count of *every* row.
+
+        The request has two plausible readings and the compiler cannot pick:
+        `COUNT(DISTINCT department)`, or a count per department. Both are
+        expressible -- the second as `group_by`, the first through `run_sql` --
+        so naming them beats guessing between them.
+        """
+        if self.distinct and self.metrics:
+            raise ValueError(
+                "`distinct` cannot be combined with `metrics`: for a count per "
+                "group use group_by, and for a count of distinct values use "
+                "run_sql with COUNT(DISTINCT column)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_projected_column_beside_an_aggregate_is_refused(self) -> QuerySpec:
+        """A bare column next to an ungrouped aggregate has no defined value.
+
+        `SELECT department, COUNT(*) FROM employees` is not valid SQL under
+        `ONLY_FULL_GROUP_BY` and most engines reject it. SQLite accepts it and
+        fills the bare column from a row of its own choosing, so the query
+        returned `department = Engineering; count_rows = 500` -- one arbitrary
+        department beside the count of every row in the tenant. The number is
+        right, the department is noise, and nothing said so.
+
+        SQLite does define the bare column for a lone MIN/MAX -- it comes from
+        the extremal row -- which is why `select=[salary], metrics=[max]`
+        looked correct while `metrics=[avg]` did not. Relying on that is
+        relying on one engine's documented quirk to make a query mean what it
+        appears to mean, and this project's whole argument is against depending
+        on engine behaviour nobody enumerated. Refusing every case is the same
+        answer for every aggregate, on every engine.
+
+        Grouping is unaffected: a column in `group_by` has exactly one value
+        per output row, which is the shape that makes the projection sound.
+        """
+        if not self.metrics:
+            return self
+        bare = [c.value for c in self.select if c not in self.group_by]
+        if bare:
+            raise ValueError(
+                f"{', '.join(bare)} cannot be selected alongside an aggregate: the "
+                f"value would come from an arbitrary row. Add it to group_by to get "
+                f"one aggregate per value, or drop it from select to get one "
+                f"aggregate over everything"
+            )
+        return self
 
     @field_validator("filters")
     @classmethod
@@ -264,7 +344,7 @@ def _referenced_columns(spec: QuerySpec) -> set[str]:
     """
     names = {c.value for c in spec.select}
     names |= {c.value for c in spec.group_by}
-    names |= {m.column.value for m in spec.metrics}
+    names |= {m.column.value for m in spec.metrics if m.column is not None}
     names |= {f.column.value for f in spec.filters}
     if spec.order_by is not None:
         names.add(spec.order_by.value)
@@ -340,6 +420,8 @@ def check_masked_columns(spec: QuerySpec, masked_columns: frozenset[str]) -> Non
             )
 
     for metric in spec.metrics:
+        if metric.column is None:  # COUNT(*) names no column to mask
+            continue
         if metric.column.value in masked_columns and metric.agg.value in EXTREMAL_AGGREGATES:
             raise tag(
                 SpecError(
@@ -399,9 +481,11 @@ def compile_spec(
     projections += [m.sql() for m in spec.metrics]
 
     # `group_by` with no metric is a request for the distinct values of those
-    # columns, which is what "what departments are there?" means.
+    # columns, which is what "what departments are there?" means. `spec.distinct`
+    # with metrics cannot reach here -- QuerySpec refuses that combination rather
+    # than dropping the keyword, which is what this line used to do.
     distinct = spec.distinct or (bool(spec.group_by) and not spec.metrics)
-    keyword = "SELECT DISTINCT" if distinct and not spec.metrics else "SELECT"
+    keyword = "SELECT DISTINCT" if distinct else "SELECT"
 
     # ruff flags f-string SQL construction, correctly in general. It is safe
     # here for a reason worth stating rather than silencing globally: every

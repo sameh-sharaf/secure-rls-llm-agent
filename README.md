@@ -137,9 +137,9 @@ department?"*. Every value below is a real capture from a run.
 **L2** (`tools/factory.py`) validates the shape and returns a typed object:
 
 ```
-select        = [Column.SALARY]        # strings are now enum members
+select        = []                     # salary moved to metric_column, below
 metrics       = ['max']
-metric_column = salary                 # inferred: the one numeric column in `select`
+metric_column = Column.SALARY          # inferred: the one numeric column in `select`
 filters       = [FilterArg(column=Column.DEPARTMENT, op=Operator.EQ,
                            value='Operations')]
 limit         = 100                    # defaulted
@@ -161,11 +161,15 @@ the wrong question — see [Challenges](#challenges).
 **L3** (`security/spec.py`) authorises the request, then compiles it:
 
 ```sql
-SELECT salary, MAX(salary) AS max_salary FROM employees WHERE department = ? LIMIT ?
+SELECT MAX(salary) AS max_salary FROM employees WHERE department = ? LIMIT ?
 -- params: ['Operations', 100]
 ```
 
-`"Operations"` never enters the statement; it is bound. There is no tenant
+`"Operations"` is a **bound parameter**, not part of the SQL text. The statement
+handed to SQLite ends at `department = ?`; the value travels beside it and is
+never parsed as SQL. Had the model written `Operations' OR '1'='1`, the database
+would look for a department literally named that and find none — a value cannot
+change the shape of a statement it was never spliced into. There is no tenant
 filter because there are no other tenants to exclude. The *same spec* as
 `acme_analyst` is refused here instead -- that role may not read an individual
 salary, and is pointed at `p90`, a median or an average.
@@ -173,7 +177,7 @@ salary, and is pointed at `p90`, a median or an average.
 **L4** (`db.py`) runs it against a connection holding 500 acme rows:
 
 ```
-[{'salary': 999999, 'max_salary': 999999}]
+[{'max_salary': 999999}]
 ```
 
 **L5** (`security/output_guard.py`, `audit.py`) verifies and records:
@@ -182,7 +186,7 @@ salary, and is pointed at `p90`, a median or an average.
 verdict = ok -- "1 rows, no identifying columns to verify"
 audit   = tool=query_db rows=1 outcome=ok
           prev_hash=0000000000000000...    # genesis: first entry
-          entry_hash=a0a3e2a0e9a7b860...   # chains the next one
+          entry_hash=bdf17734043aaa92...   # chains the next one
 ```
 
 No `user_id` was projected, so there was no id to check against the privileged
@@ -521,6 +525,25 @@ field is now resolved or refused — inferred from `select` when that names
 exactly one numeric column, and otherwise a validation error that the existing
 retry loop feeds back to the planner. Guessing is cheaper than a round trip
 only until the guess is wrong.
+
+**Two more defaults removed alongside it.** `Metric.column` fell back to
+`user_id`, so a metric built without a column became an aggregate over an
+identifier rather than an error. And the compiler *dropped* `distinct` whenever
+a metric was present: asked how many distinct departments there are, a model
+sending `select=[department], distinct, count` got back `department =
+Engineering; count_rows = 500` — one arbitrary department beside the count of
+every row. Both are now refused, with the refusal naming the two ways to ask
+what was meant.
+
+**A bare column beside an ungrouped aggregate is refused too.** `SELECT
+department, COUNT(*)` is invalid under `ONLY_FULL_GROUP_BY` and rejected by most
+engines; SQLite accepts it and fills the bare column from a row of its choosing.
+It defines that row for a lone `MIN`/`MAX`, which is why the trace above once
+returned `{'salary': 999999, 'max_salary': 999999}` and looked right while the
+same shape with `avg` did not. Depending on one engine's documented quirk to
+make a query mean what it appears to mean is the argument this project spends
+ADR-0006 rejecting, so the shape is refused on every aggregate. Grouping is
+unaffected: a column in `group_by` has exactly one value per output row.
 
 **`COUNT(*)` contains a `Star` node.** A naive "reject any star" check in the
 sqlglot guard rejected legitimate counts. Caught by a test, not by review.

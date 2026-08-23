@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -300,3 +301,50 @@ def test_the_tenant_s_own_queries_still_work(restricted: QueryGateway) -> None:
         )
     )
     assert result.rows
+
+
+# ------------------------------------------------- no silent substitutions ---
+# Two defaults used to turn "the caller did not say" into "the caller said
+# this": `Metric.column` fell back to `user_id`, and the compiler dropped
+# `distinct` whenever a metric was present. Both produced a confident answer to
+# a question nobody asked, which is worse than a refusal.
+
+
+@pytest.mark.parametrize("agg", ["avg", "sum", "min", "max", "median", "p75", "p90"])
+def test_an_aggregate_without_a_column_is_refused_not_defaulted(agg: str) -> None:
+    with pytest.raises(ValidationError) as exc:
+        Metric(agg=Aggregate(agg))
+    assert "needs a column" in str(exc.value)
+
+
+def test_count_is_the_one_aggregate_that_needs_no_column() -> None:
+    """COUNT compiles to COUNT(*), so there is no column to demand or invent."""
+    metric = Metric(agg=Aggregate.COUNT)
+    assert metric.column is None
+    assert metric.sql() == "COUNT(*) AS count_rows"
+
+
+def test_a_countless_spec_still_compiles_with_no_column_named() -> None:
+    compiled = compile_spec(QuerySpec(metrics=[Metric(agg=Aggregate.COUNT)]))
+    assert "COUNT(*)" in compiled.sql
+    assert "user_id" not in compiled.sql
+
+
+def test_distinct_with_metrics_is_refused_rather_than_silently_dropped() -> None:
+    """The bug: `select=[department], distinct, count` answered with one
+    arbitrary department beside the count of every row."""
+    with pytest.raises(ValidationError) as exc:
+        QuerySpec(
+            select=[Column.DEPARTMENT],
+            distinct=True,
+            metrics=[Metric(agg=Aggregate.COUNT)],
+        )
+    message = str(exc.value)
+    assert "distinct" in message
+    # The refusal has to name the two ways to ask what was meant.
+    assert "group_by" in message and "COUNT(DISTINCT" in message
+
+
+def test_distinct_without_metrics_still_compiles_to_select_distinct() -> None:
+    compiled = compile_spec(QuerySpec(select=[Column.DEPARTMENT], distinct=True))
+    assert compiled.sql.startswith("SELECT DISTINCT department")
