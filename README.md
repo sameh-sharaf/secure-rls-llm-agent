@@ -29,7 +29,7 @@ instructed not to.
   - [How the verdict is computed](#how-the-verdict-is-computed)
 - [Testing](#testing)
 - [Decision records](#decision-records)
-- [Challenges](#challenges)
+- [Challenges & limitations](#challenges--limitations)
 - [Time spent](#time-spent)
 
 ---
@@ -156,7 +156,7 @@ an average by department, with no measure named, the call is refused and the
 reason goes back to the planner to revise.
 
 That last one used to be a silent default to `salary`, which quietly answered
-the wrong question — see [Challenges](#challenges).
+the wrong question — see [Challenges & limitations](#challenges--limitations).
 
 **L3** (`security/spec.py`) authorises the request, then compiles it:
 
@@ -492,7 +492,20 @@ Each is cited from the code at the line it explains.
 
 ---
 
-## Challenges
+## Challenges & limitations
+
+- **The agent does single-pass analytics over one table.** Both query paths are
+  built for filter → group → aggregate, and anything outside that shape is
+  refused rather than approximated. There is one readable relation, so no joins
+  to other data; CTEs and `UNION` are refused by design (ADR-0002); window
+  functions, `CASE` expressions and output aliases are outside the SQL guard's
+  allowlist. *"What is the average salary per department?"* works. *"How did
+  average salary change year over year?"* does not — it needs a derived year
+  column, and `strftime` is normalised by sqlglot to a name the allowlist does
+  not carry. *"Rank the top three earners in each department"* needs a window
+  function and is refused the same way. These are limits on the **query
+  surface**, not on the boundary: each is a refusal, never a wrong answer and
+  never a wider read.
 
 - **A temp view over the base table has a real bypass.** SQLite reports a
   *CTE's* name in the authorizer's `source` argument, so
