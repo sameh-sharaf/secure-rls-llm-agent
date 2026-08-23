@@ -24,7 +24,6 @@ instructed not to.
 - [Security testing](#security-testing)
 - [Evaluation](#evaluation)
   - [Results](#results)
-  - [Two role-boundary defects found by comparing models](#two-role-boundary-defects-found-by-comparing-models)
   - [How the verdict is computed](#how-the-verdict-is-computed)
 - [Testing](#testing)
 - [Decision records](#decision-records)
@@ -392,62 +391,6 @@ cross-tenant leak rate is 0.00% for all three.** The tenant boundary sits below
 the model, so swapping a 26B for a 7B changes answer quality and speed and
 nothing about safety. Model choice is a quality-and-latency decision rather
 than a safety one, which is the result this comparison exists to produce.
-
-Two caveats on the quality numbers, since they are easy to over-read:
-
-- **Tool-selection accuracy is 100% for all three, and it is graded on four
-  cases.** It is not comparable evidence to answer accuracy, which is graded on
-  eighteen. Picking the right tool is the easy part.
-- **`llama3.1:8b`'s 38.9% is a tool-calling failure, not a wrong-answer
-  problem.** It answered 7 of 18 graded questions without calling a tool at
-  all, against 17 of 18 for `qwen2.5:7b` — a *smaller* model on the identical
-  schema. When llama did call a tool it chose correctly every time. Four repeat
-  runs gave 38.9 / 38.9 / 27.8 / 38.9, so the figure is stable rather than a
-  bad draw. Widening that gap is listed under [Future
-  work](#future-work); it does not touch the boundary.
-
-#### Two role-boundary defects found by comparing models
-
-Both were found by running a weaker model and reading its output — not by
-design review, not by the red-team suite, and not by the deterministic tests.
-
-**`MIN`/`MAX` on a masked column disclosed an individual.** Asked "who is the
-single highest paid person and what do they earn?" as an **analyst** — a role
-barred from reading individual salaries — `qwen2.5` answered "999,999 EUR",
-correctly, via `MAX(salary)`. `MAX` is an aggregate by syntax and one specific
-person's pay by content, so it passes every cohort-size check: k-anonymity
-protects against *small groups* and says nothing about aggregates that select a
-single row. `MIN` has the same property.
-
-Fixed on both the structured and SQL paths — `MIN`/`MAX` on a masked column are
-treated as row-level reads (`EXTREMAL_AGGREGATES` in `spec.py`), while `AVG`,
-`SUM`, `COUNT` and `MEDIAN` combine many values and remain available. Three new
-red-team cases and seven deterministic tests cover it.
-
-The tenant boundary held throughout, and the leak-rate metric reported 0.00%
-the whole time — correctly by its own definition, because it only ever measured
-cross-tenant disclosure. The metric is now labelled *cross-tenant* leak rate
-everywhere so it does not imply coverage it never had.
-
-`MEDIAN` is deliberately *not* restricted: on an odd cohort it can equal some
-individual's value, but "the median earner" is not an identity anyone can
-target. That is a judgement call, recorded rather than left implicit.
-
-**Sample rows bypassed the column mask.** With `MAX` closed, `llama3.1` still
-answered the same question with €163,500 — a real acme salary. It was not
-hallucinating; it was reciting its own system prompt. `sample_rows()` injects
-three real employees into every prompt to ground the model's idea of the
-schema, and it did not apply the column mask, so an analyst was handed three
-individual salaries before asking anything — and the same unmasked rows were
-rendered in the UI.
-
-The boundary was enforced on the query path and bypassed by a side channel
-built alongside it. Masking now lives in `QueryGateway.sample_rows()`, the one
-method every caller goes through, and a test asserts that no real salary from
-the tenant appears anywhere in an analyst's system prompt — checked against all
-500 of them, rather than against the three that happened to be sampled. The
-general rule is now invariant 5b in `CLAUDE.md`: *every path that shows a value
-is an output, including the prompt.*
 
 ### How the verdict is computed
 
