@@ -15,6 +15,7 @@ principal's role) even though the check runs inside layer 3.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 
 
@@ -38,6 +39,75 @@ class Layer(StrEnum):
     @property
     def label(self) -> str:
         return f"{self.value} {self.title}"
+
+
+@dataclass(frozen=True)
+class LayerConfig:
+    """Which defensive layers are active for one gateway.
+
+    This exists so the ablation study -- and the lab panel in the UI -- can
+    build a *weakened* stack by construction rather than by monkey-patching
+    module globals. The harness used to do the latter, and it is worth saying
+    why that had to stop:
+
+    * Patching `OutputGuard.check_rows` on the class disables layer 5 for every
+      session in the process. Streamlit serves every logged-in browser from one
+      process, so one person's experiment would have silently removed a control
+      for everyone else signed in.
+    * The patch/restore pair is not exception-safe. A raise in between leaves
+      the process running with a control switched off and nothing saying so.
+    * It is also easy to patch the wrong name: `gateway.py` binds `guard_sql`
+      into its own namespace at import, so patching `sql_guard.guard_sql`
+      changes nothing the gateway calls. The harness did exactly that and
+      reported a confident 0.00% for every arm, including the one built to
+      leak (see `tests/test_ablation_harness.py`).
+
+    Configuration passed to a constructor has none of those failure modes: the
+    weakened object is a separate object, and the live session keeps its own.
+
+    **There is deliberately no switch for layers 1 and 2.** They are not
+    runtime checks that can be skipped -- L1 is what *constructs* the session,
+    so "off" is not a weaker system but no session at all, and L2 is the shape
+    of the tool schema, so "off" means building a different tool that takes a
+    tenant argument. That is writing the vulnerability, not disabling a check,
+    and invariant 1 plus the pre-commit hook exist to stop exactly that. The
+    absence of those two fields is a statement about the architecture, not an
+    omission.
+    """
+
+    #: Validate and rewrite model-written SQL on the sqlglot AST.
+    l3_query_gateway: bool = True
+    #: Materialise the tenant's rows into a private database and detach the
+    #: source. Off means the naive build: the full table, an app-code WHERE.
+    l4_database_boundary: bool = True
+    #: Verify every result against a privileged id set before it is returned.
+    l5_output_guard: bool = True
+
+    @property
+    def all_on(self) -> bool:
+        return self.l3_query_gateway and self.l4_database_boundary and self.l5_output_guard
+
+    def disabled(self) -> list[Layer]:
+        """The layers switched off, for labelling a result or an audit entry."""
+        out = []
+        if not self.l3_query_gateway:
+            out.append(Layer.L3)
+        if not self.l4_database_boundary:
+            out.append(Layer.L4)
+        if not self.l5_output_guard:
+            out.append(Layer.L5)
+        return out
+
+    def describe(self) -> str:
+        off = self.disabled()
+        if not off:
+            return "all layers active"
+        return "disabled: " + ", ".join(layer.label for layer in off)
+
+
+#: The only configuration the application itself ever builds. Anything else is
+#: a laboratory object, and every caller that makes one says so out loud.
+ALL_LAYERS = LayerConfig()
 
 
 #: Fallback mapping by exception type, used when a raise site has not tagged the

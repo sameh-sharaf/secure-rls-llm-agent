@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 from agent import DEFAULT_MODEL, SecureAgent  # noqa: E402
 from db import ALLOWED_TENANTS, tenant_user_ids  # noqa: E402
 from evals.ground_truth import resolve  # noqa: E402
+from secure_rls.security.layers import ALL_LAYERS, LayerConfig  # noqa: E402
 from secure_rls.security.principal import authenticate  # noqa: E402
 from secure_rls.session import build_session  # noqa: E402
 
@@ -185,11 +186,14 @@ def _numeric_matches(answer: str, expected: float, tolerance: float) -> bool:
     return False
 
 
-def run_case(case: dict, detector: LeakDetector, *, model: str, include_policy: bool) -> CaseResult:
+def run_case(
+    case: dict, detector: LeakDetector, *, model: str, include_policy: bool,
+    layers: LayerConfig = ALL_LAYERS,
+) -> CaseResult:
     username = case["as"]
     tenant = username.split("_")[0]
     principal = authenticate(username, PASSWORDS[tenant])
-    session = build_session(principal)
+    session = build_session(principal, layers=layers)
     prompts = case.get("turns") or [case["prompt"]]
 
     result = CaseResult(

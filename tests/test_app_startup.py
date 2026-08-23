@@ -113,3 +113,41 @@ def test_stale_modules_is_quiet_when_nothing_changed(monkeypatch) -> None:
 
     monkeypatch.setattr(app, "_code_loaded_at", lambda: time.time() + 3600)
     assert app.stale_modules() == []
+
+
+# ------------------------------------------------------------- the layer lab ---
+
+
+def test_the_layer_lab_is_off_unless_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A control labelled "switch the security layers off" must not ship visible.
+
+    Not because it is unsafe here -- every object it builds is a throwaway bound
+    to the caller's own tenant, and the live session is untouched -- but because
+    a reviewer who sees that button before reading the caption forms a fast and
+    wrong impression. Opt in with SECURE_RLS_LAB=1.
+    """
+    import importlib
+
+    for value in ("", "0", "false", "no"):
+        monkeypatch.setenv("SECURE_RLS_LAB", value)
+        app = importlib.reload(importlib.import_module("app"))
+        assert app.LAB_ENABLED is False, value
+
+    for value in ("1", "true", "yes", "on"):
+        monkeypatch.setenv("SECURE_RLS_LAB", value)
+        app = importlib.reload(importlib.import_module("app"))
+        assert app.LAB_ENABLED is True, value
+
+
+def test_the_lab_probes_all_name_the_base_table_or_the_catalog() -> None:
+    """A probe that cannot possibly leak would demonstrate nothing.
+
+    Each one has to reach for something outside the tenant's own relation,
+    or switching the layers off would change nothing visible and the panel
+    would teach the opposite of what it is for.
+    """
+    import importlib
+
+    app = importlib.reload(importlib.import_module("app"))
+    for name, sql in app.LAB_PROBES.items():
+        assert "employees_base" in sql or "sqlite_master" in sql, name

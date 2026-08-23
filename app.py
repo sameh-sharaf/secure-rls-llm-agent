@@ -15,6 +15,7 @@ implies is not authenticated.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -27,7 +28,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from chat_ux import inject_chat_ux  # noqa: E402
-from db import DB_PATH, schema_description  # noqa: E402
+from db import DB_PATH, SecurityError, schema_description  # noqa: E402
 from secure_rls.security.principal import (  # noqa: E402
     AuthenticationError,
     authenticate,
@@ -562,6 +563,111 @@ def render_security(session) -> None:
             )
         else:
             st.success("Answered within your own organisation. No leak.")
+
+    render_layer_lab(session)
+
+
+# ------------------------------------------------------------------ the lab
+
+#: The lab builds deliberately weakened stacks, so it is off unless asked for.
+#:
+#: Not because it is dangerous to this deployment -- every object it makes is a
+#: throwaway bound to the caller's own tenant, and the live session is never
+#: touched -- but because a control labelled "turn off the security layers"
+#: sitting in a shipped app invites exactly one reading, and it is the wrong
+#: one. Opt in with SECURE_RLS_LAB=1.
+LAB_ENABLED = os.environ.get("SECURE_RLS_LAB", "").strip() not in ("", "0", "false", "no")
+
+#: Probes fired straight at a sandbox gateway. No model, no prompt, no agent --
+#: which is the point. "Which layer stops this" is a property of the code, and
+#: asking a non-deterministic component to demonstrate it only adds a way to
+#: get the wrong answer.
+LAB_PROBES = {
+    "Read the base table directly":
+        "SELECT user_id, name, salary FROM employees_base ORDER BY user_id DESC LIMIT 20",
+    "CTE named after the agent's table":
+        "WITH employees AS (SELECT user_id, name, salary FROM employees_base) "
+        "SELECT * FROM employees ORDER BY user_id DESC LIMIT 20",
+    "UNION smuggle":
+        "SELECT user_id, name FROM employees UNION "
+        "SELECT user_id, name FROM employees_base ORDER BY user_id DESC LIMIT 20",
+    "Schema probe": "SELECT name, sql FROM sqlite_master",
+}
+
+
+def render_layer_lab(session) -> None:
+    """Fire an attack at a sandbox stack with layers switched off, and see who catches it."""
+    if not LAB_ENABLED:
+        return
+
+    from secure_rls.security.gateway import QueryGateway
+    from secure_rls.security.layers import LayerConfig
+    from secure_rls.security.output_guard import LeakDetected
+    from secure_rls.security.sql_guard import SqlRejected
+
+    st.divider()
+    st.markdown("#### Layer lab")
+    st.caption(
+        "Switch layers off and fire an attack at a **throwaway** gateway built for this "
+        "probe alone. Your live session keeps every layer — the weakened stack is a "
+        "separate object, not a change to the running app."
+    )
+
+    st.markdown(
+        "**Layers 1 and 2 are not switches.** L1 *builds* the session, so "
+        "\"off\" is not a weaker system but no session at all. L2 is the shape of the "
+        "tool schema, so \"off\" means writing a different tool that takes a tenant "
+        "argument — that is authoring the vulnerability, not disabling a check."
+    )
+
+    cols = st.columns(3)
+    l3 = cols[0].checkbox("L3 query gateway", value=True, key="lab_l3")
+    l4 = cols[1].checkbox("L4 database boundary", value=True, key="lab_l4")
+    l5 = cols[2].checkbox("L5 output guard", value=True, key="lab_l5")
+    layers = LayerConfig(l3_query_gateway=l3, l4_database_boundary=l4, l5_output_guard=l5)
+
+    probe = st.selectbox("Attack", list(LAB_PROBES), key="lab_probe")
+    sql = LAB_PROBES[probe]
+    st.code(sql, language="sql")
+
+    if not st.button("Fire at the sandbox", key="lab_run"):
+        return
+
+    allowed = session.gateway.allowed_user_ids
+    gateway = QueryGateway(session.principal, layers=layers)
+    try:
+        rows = gateway.run_sql(sql).rows
+    except SqlRejected as exc:
+        st.success(f"Stopped by **L3 query gateway** — {exc}")
+    except SecurityError as exc:
+        st.success(f"Stopped by **L4 database boundary** — {exc}")
+    except LeakDetected as exc:
+        st.success(f"Stopped by **L5 output guard** — {exc}")
+    except Exception as exc:  # noqa: BLE001 - a lab surface reports, never crashes the tab
+        st.warning(f"{type(exc).__name__}: {exc}")
+    else:
+        foreign = sorted(
+            {int(r["user_id"]) for r in rows if r.get("user_id") is not None} - set(allowed)
+        )
+        if foreign:
+            st.error(
+                f"**LEAK — nothing stopped it.** {len(rows)} rows returned, including "
+                f"user_ids {foreign[:6]} that do not belong to "
+                f"`{session.principal.tenant_id}`. This is the naive build, and it is "
+                f"what the layers you switched off were preventing."
+            )
+            st.dataframe(pd.DataFrame(rows).head(12), width="stretch")
+        else:
+            st.info(f"{len(rows)} rows returned, all inside your own organisation.")
+    finally:
+        gateway.close()
+
+    st.caption(
+        "Turning every layer off is the only configuration that leaks. L3, L4 and L5 "
+        "are each independently sufficient against generated SQL — but only L4's "
+        "guarantee holds without anyone having anticipated the attack, which is why "
+        "it is the one the design rests on."
+    )
 
 
 # --------------------------------------------------------------- transparency

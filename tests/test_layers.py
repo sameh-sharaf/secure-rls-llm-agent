@@ -107,23 +107,81 @@ def test_cohort_refusal_is_attributed_to_l3(cohort_floor) -> None:
 
 def test_database_refusal_is_attributed_to_l4() -> None:
     """With the query gateway bypassed, the engine refuses -- and says so."""
-    from evals.ablation import _Patches
+    from secure_rls.security.gateway import QueryGateway
+    from secure_rls.security.layers import LayerConfig
+    from secure_rls.security.principal import authenticate
 
-    patches = _Patches()
-    patches.disable_l3()
+    gw = QueryGateway(
+        authenticate("acme_admin", "acme123"),
+        layers=LayerConfig(l3_query_gateway=False),
+    )
     try:
-        gw = _gateway("acme_admin")
-        try:
-            with pytest.raises(SecurityError) as caught:
-                gw.run_sql("SELECT user_id FROM employees_base LIMIT 5")
-            assert layer_of(caught.value) is Layer.L4
-        finally:
-            gw.close()
+        with pytest.raises(SecurityError) as caught:
+            gw.run_sql("SELECT user_id FROM employees_base LIMIT 5")
+        assert layer_of(caught.value) is Layer.L4
     finally:
-        patches.restore()
+        gw.close()
 
 
 def test_tool_refusal_message_names_the_layer() -> None:
     assert refusal_layer(SecurityError("x")) == "L4 database boundary"
     assert refusal_layer(SqlRejected("x")) == "L3 query gateway"
     assert refusal_layer(tag(SpecError("x"), Layer.L1)) == "L1 identity & role policy"
+
+
+# ------------------------------------------------------- LayerConfig itself ---
+
+
+def test_layers_1_and_2_are_not_switches() -> None:
+    """The absence of those fields is a design statement, not an oversight.
+
+    L1 constructs the session and L2 is the shape of the tool schema. Adding a
+    switch for either would mean shipping a code path that builds a session
+    with no principal, or a tool that takes a tenant argument -- which
+    invariant 1 and the pre-commit hook exist to prevent.
+    """
+    from secure_rls.security.layers import LayerConfig
+
+    fields = set(LayerConfig.__dataclass_fields__)
+    assert fields == {"l3_query_gateway", "l4_database_boundary", "l5_output_guard"}
+    for forbidden in ("l1", "l2", "identity", "tool_contract", "principal", "tenant"):
+        assert not any(forbidden in f for f in fields), forbidden
+
+
+def test_every_layer_is_on_by_default() -> None:
+    """Fail closed: the default constructor is the shipping configuration."""
+    from secure_rls.security.layers import ALL_LAYERS, LayerConfig
+
+    assert LayerConfig().all_on
+    assert ALL_LAYERS.all_on
+    assert LayerConfig().disabled() == []
+    assert LayerConfig().describe() == "all layers active"
+
+
+def test_a_weakened_gateway_is_recorded_in_its_own_audit_log() -> None:
+    """Switching a control off is itself a security event, so it gets an entry."""
+    from secure_rls.security.gateway import QueryGateway
+    from secure_rls.security.layers import Layer, LayerConfig
+    from secure_rls.security.principal import authenticate
+
+    layers = LayerConfig(l3_query_gateway=False, l5_output_guard=False)
+    assert layers.disabled() == [Layer.L3, Layer.L5]
+
+    gw = QueryGateway(authenticate("acme_admin", "acme123"), layers=layers)
+    try:
+        entries = [e for e in gw.audit.entries() if e.tool == "__gateway__"]
+        assert len(entries) == 1
+        assert "L3" in entries[0].arguments and "L5" in entries[0].arguments
+    finally:
+        gw.close()
+
+
+def test_the_default_gateway_records_no_such_event() -> None:
+    from secure_rls.security.gateway import QueryGateway
+    from secure_rls.security.principal import authenticate
+
+    gw = QueryGateway(authenticate("acme_admin", "acme123"))
+    try:
+        assert not [e for e in gw.audit.entries() if e.tool == "__gateway__"]
+    finally:
+        gw.close()

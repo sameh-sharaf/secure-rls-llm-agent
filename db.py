@@ -355,6 +355,45 @@ def tenant_connection(
     return conn
 
 
+def naive_connection(
+    tenant: str, db_path: Path = DB_PATH, clock: dict | None = None
+) -> sqlite3.Connection:
+    """Layer 4 as most implementations of this brief actually build it.
+
+    **Not reachable from the application.** The only callers are the ablation
+    study and the lab panel in the Security tab, both of which exist to show
+    what this design is worth by standing next to something weaker.
+
+    The difference from `tenant_connection` is the entire argument of this
+    project, so it is worth being precise about what is missing here rather
+    than describing it as "insecure":
+
+    * the base table is present and reachable -- nothing was materialised and
+      nothing was detached, so `employees_base` names a real relation;
+    * there is no authorizer, so `sqlite_master`, `PRAGMA` and every other
+      table are readable;
+    * the tenant filter is a `WHERE` clause in a view that application code
+      remembered to write, which is exactly the "developer remembered it"
+      pattern row-level security exists to replace.
+
+    A statement that never mentions the view -- `SELECT * FROM employees_base`
+    -- is answered in full, for all three tenants. That is the point.
+    """
+    _require_known_tenant(tenant)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    columns = ", ".join(AGENT_COLUMNS)
+    # Interpolated rather than bound, because a view definition cannot carry a
+    # parameter -- which is itself part of why this design is the fragile one.
+    # `tenant` has been checked against the allowlist immediately above.
+    conn.execute(
+        f"CREATE TEMP VIEW {AGENT_TABLE} AS "  # nosec B608
+        f"SELECT {columns} FROM {BASE_TABLE} WHERE tenant_id = '{tenant}'"
+    )
+    _install_timeout(conn, clock if clock is not None else {})
+    return conn  # no authorizer: employees_base stays reachable
+
+
 def _install_timeout(conn: sqlite3.Connection, clock: dict) -> None:
     """Abort runaway statements. A cartesian join is a denial-of-service too.
 
@@ -385,10 +424,15 @@ class TenantDatabase:
     the binding happens once, in the constructor, from the session principal.
     """
 
-    def __init__(self, tenant: str, db_path: Path = DB_PATH) -> None:
+    def __init__(self, tenant: str, db_path: Path = DB_PATH, *, boundary: bool = True) -> None:
         self.tenant = _require_known_tenant(tenant)
+        self.boundary = boundary
         self._clock: dict = {}
-        self._conn = tenant_connection(self.tenant, db_path, self._clock)
+        # `boundary=False` is the ablation's naive arm. Keyword-only and
+        # defaulted on, so reaching the weak build takes a deliberate argument
+        # at a call site rather than a mistake in one.
+        build = tenant_connection if boundary else naive_connection
+        self._conn = build(self.tenant, db_path, self._clock)
         # The connection is no longer thread-bound (see `tenant_connection`),
         # so every statement is serialised here instead. The lock must span
         # execute *and* fetch: two threads interleaving on one cursor is how a

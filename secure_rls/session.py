@@ -21,6 +21,7 @@ from secure_rls.rag.retriever import CHROMA_PATH, TenantNotesRetriever
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.conversation import STORE_PATH, ConversationStore
 from secure_rls.security.gateway import QueryGateway
+from secure_rls.security.layers import ALL_LAYERS, LayerConfig
 from secure_rls.security.principal import Principal
 from secure_rls.tools.factory import ToolContext, build_tools
 
@@ -61,9 +62,12 @@ def build_session(
     chroma_path: Path = CHROMA_PATH,
     store_path: Path = STORE_PATH,
     with_rag: bool = True,
+    layers: LayerConfig = ALL_LAYERS,
 ) -> Session:
+    """Build one session. `layers` is for the ablation study and the lab panel
+    only -- the application never passes anything but the default."""
     audit = AuditLog()
-    gateway = QueryGateway(principal, audit=audit, db_path=db_path)
+    gateway = QueryGateway(principal, audit=audit, db_path=db_path, layers=layers)
 
     retriever = None
     if with_rag:

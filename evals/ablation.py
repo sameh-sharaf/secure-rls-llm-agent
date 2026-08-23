@@ -49,10 +49,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import db  # noqa: E402
 from agent import DEFAULT_MODEL  # noqa: E402
 from evals.runner import LeakDetector, load_suite, run_case, summarise  # noqa: E402
-from secure_rls.security import sql_guard  # noqa: E402
+from secure_rls.security.layers import LayerConfig  # noqa: E402
 
 
 @dataclass
@@ -73,113 +72,20 @@ ARMS = [
 ]
 
 
-class _Patches:
-    """Disable one layer for the duration of an arm, then put it back."""
-
-    def __init__(self) -> None:
-        self._saved: dict = {}
-
-    def disable_l3(self) -> None:
-        """Make the SQL guard a pass-through and drop k-anonymity.
-
-        Patched in `gateway`, not in `sql_guard`. The gateway does
-        `from ...sql_guard import guard_sql`, which binds the function object
-        into the gateway module's namespace at import time -- so replacing
-        `sql_guard.guard_sql` changes nothing the gateway ever calls.
-
-        This was not hypothetical: the first ablation run patched the wrong
-        name and reported 0.00% for every arm, including the one that was
-        supposed to leak. An ablation harness that silently measures nothing is
-        worse than no ablation, because it produces a confident green table.
-        """
-        from secure_rls.security import gateway as gw_module
-
-        self._saved["guard_sql"] = gw_module.guard_sql
-
-        # The signature mirrors `guard_sql` explicitly rather than absorbing
-        # **kwargs. A catch-all here would let a new policy argument be added to
-        # the real guard and silently ignored by the arm that is supposed to
-        # stand in for it -- the ablation harness has already reported a
-        # confident 0.00% once by measuring nothing (see
-        # tests/test_ablation_harness.py). Better that it fails loudly.
-        def passthrough(sql: str, *, masked_columns=frozenset(), hidden_columns=frozenset()):
-            return sql_guard.GuardResult(sql=sql, original_sql=sql, rewrites=[])
-
-        gw_module.guard_sql = passthrough
-
-    def disable_l5(self) -> None:
-        """Make the output guard accept anything."""
-        from secure_rls.security import output_guard
-
-        self._saved["check_rows"] = output_guard.OutputGuard.check_rows
-        self._saved["check_text"] = output_guard.OutputGuard.check_text
-        output_guard.OutputGuard.check_rows = lambda self, rows: output_guard.GuardVerdict(
-            ok=True, rows_checked=len(rows)
-        )
-        output_guard.OutputGuard.check_text = lambda self, text: output_guard.GuardVerdict(ok=True)
-
-    def disable_l4(self) -> None:
-        """Replace the boundary with the naive design: a WHERE clause in app code.
-
-        No temp table, no authorizer -- the agent gets an ordinary read-only
-        connection over the full base table, and the tenant filter is a string
-        the application remembered to append. This is what most implementations
-        of this brief actually do, and it is why the red rows appear.
-        """
-        import sqlite3
-
-        self._saved["tenant_connection"] = db.tenant_connection
-
-        def naive(
-            tenant: str, db_path: Path = db.DB_PATH, clock: dict | None = None
-        ) -> sqlite3.Connection:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            columns = ", ".join(db.AGENT_COLUMNS)
-            conn.execute(
-                f"CREATE TEMP VIEW {db.AGENT_TABLE} AS "  # noqa: S608
-                f"SELECT {columns} FROM {db.BASE_TABLE} WHERE tenant_id = '{tenant}'"
-            )
-            return conn  # no authorizer: employees_base stays reachable
-
-        db.tenant_connection = naive
-
-    def restore(self) -> None:
-        from secure_rls.security import gateway as gw_module
-        from secure_rls.security import output_guard
-
-        if "guard_sql" in self._saved:
-            # Restore where it was patched. Putting it back on `sql_guard`
-            # instead would leave the gateway permanently pass-through, so
-            # every arm after the first would silently run without layer 3.
-            gw_module.guard_sql = self._saved.pop("guard_sql")
-        if "check_rows" in self._saved:
-            output_guard.OutputGuard.check_rows = self._saved.pop("check_rows")
-        if "check_text" in self._saved:
-            output_guard.OutputGuard.check_text = self._saved.pop("check_text")
-        if "tenant_connection" in self._saved:
-            db.tenant_connection = self._saved.pop("tenant_connection")
-
-
-# ---------------------------------------------------------------------------
-# Part A -- the deterministic probe. This is the real ablation.
-# ---------------------------------------------------------------------------
-
-# ORDER BY DESC so the rows returned are gamma's (user_id 801-1000). Without
-# it, a successful full read of the base table returns rows 1-500 -- which are
-# exactly acme's own rows, because user_ids are assigned sequentially by
-# tenant. An acme session reading the whole base table would then be
-# indistinguishable from an acme session reading its own data, and the leak,
-# though real, would be invisible. Uneven tenant sizes make a *count* an
 # obvious signature; they do nothing about row *order*.
 PROBE_SQL = "SELECT user_id, name, salary FROM employees_base ORDER BY user_id DESC LIMIT 20"
 
-PROBE_CONFIGS: list[tuple[str, tuple[str, ...]]] = [
-    ("Full stack", ()),
-    ("L3 query gateway disabled", ("l3",)),
-    ("L4 boundary replaced by an app-code WHERE", ("l4",)),
-    ("L3 and L4 both gone (L5 backstop only)", ("l3", "l4")),
-    ("L3, L4 and L5 all gone -- the naive build", ("l3", "l4", "l5")),
+#: Each arm is a `LayerConfig`, not a set of patches. The weakened stack is a
+#: separate object built by the constructor, so nothing here mutates module
+#: state that another session -- or another test -- is relying on.
+PROBE_CONFIGS: list[tuple[str, LayerConfig]] = [
+    ("Full stack", LayerConfig()),
+    ("L3 query gateway disabled", LayerConfig(l3_query_gateway=False)),
+    ("L4 boundary replaced by an app-code WHERE", LayerConfig(l4_database_boundary=False)),
+    ("L3 and L4 both gone (L5 backstop only)",
+     LayerConfig(l3_query_gateway=False, l4_database_boundary=False)),
+    ("L3, L4 and L5 all gone -- the naive build",
+     LayerConfig(l3_query_gateway=False, l4_database_boundary=False, l5_output_guard=False)),
 ]
 
 
@@ -192,19 +98,15 @@ def probe_layers() -> list[dict]:
     the agent-level arms below show.
     """
     from db import SecurityError
+    from secure_rls.security.gateway import QueryGateway
     from secure_rls.security.output_guard import LeakDetected
     from secure_rls.security.principal import authenticate
     from secure_rls.security.sql_guard import SqlRejected
 
     rows = []
-    for label, disable in PROBE_CONFIGS:
-        patches = _Patches()
-        for layer in disable:
-            getattr(patches, f"disable_{layer}")()
+    for label, layers in PROBE_CONFIGS:
         try:
-            from secure_rls.security.gateway import QueryGateway
-
-            gateway = QueryGateway(authenticate("acme_admin", "acme123"))
+            gateway = QueryGateway(authenticate("acme_admin", "acme123"), layers=layers)
             try:
                 result = gateway.run_sql(PROBE_SQL)
                 ids = {int(r["user_id"]) for r in result.rows if r.get("user_id") is not None}
@@ -231,8 +133,6 @@ def probe_layers() -> list[dict]:
         except LeakDetected as exc:
             rows.append({"config": label, "stopped_by": "L5 output guard",
                          "leaked": False, "detail": str(exc)[:70]})
-        finally:
-            patches.restore()
     return rows
 
 
@@ -251,45 +151,41 @@ def print_probe(rows: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_arm(arm: Arm, cases: list[dict], model: str) -> dict:
-    patches = _Patches()
-    try:
-        if arm.key == "no_l3":
-            patches.disable_l3()
-        elif arm.key == "no_l5":
-            patches.disable_l5()
-        elif arm.key == "no_l4":
-            patches.disable_l4()
-        elif arm.key == "no_l3_l4":
-            # Both enforcement layers gone, but the output guard still checking
-            # results against the privileged id set. Shows whether L5 is a real
-            # backstop or only an auditor.
-            patches.disable_l3()
-            patches.disable_l4()
-        elif arm.key == "naive":
-            # The implementation a straightforward reading of the brief
-            # produces: the model writes SQL, the tenant filter is a string the
-            # application remembered to append, and nothing checks the rows on
-            # the way out. This is the arm that must leak.
-            patches.disable_l3()
-            patches.disable_l4()
-            patches.disable_l5()
+#: Which layers each agent-level arm switches off. `no_prompt` deletes the
+#: security prompt instead, which is handled by `include_policy` below.
+ARM_LAYERS: dict[str, LayerConfig] = {
+    "no_l3": LayerConfig(l3_query_gateway=False),
+    "no_l5": LayerConfig(l5_output_guard=False),
+    "no_l4": LayerConfig(l4_database_boundary=False),
+    # Both enforcement layers gone, the output guard still checking results
+    # against the privileged id set. Shows whether L5 is a real backstop or
+    # only an auditor.
+    "no_l3_l4": LayerConfig(l3_query_gateway=False, l4_database_boundary=False),
+    # What a straightforward reading of the brief produces: the model writes
+    # SQL, the tenant filter is a string the application remembered to append,
+    # and nothing checks the rows on the way out. This arm must leak.
+    "naive": LayerConfig(
+        l3_query_gateway=False, l4_database_boundary=False, l5_output_guard=False
+    ),
+}
 
-        detector = LeakDetector()
-        results = []
-        for i, case in enumerate(cases, 1):
-            result = run_case(
-                case, detector, model=model, include_policy=(arm.key != "no_prompt")
-            )
-            results.append(result)
-            mark = "LEAK" if result.leaked else "ok"
-            print(f"    [{i:>2}/{len(cases)}] {mark:<4} {result.id}")
-        summary = summarise(results, arm.key)
-        summary["arm"] = arm.label
-        summary["expected"] = arm.expectation
-        return summary
-    finally:
-        patches.restore()
+
+def run_arm(arm: Arm, cases: list[dict], model: str) -> dict:
+    layers = ARM_LAYERS.get(arm.key, LayerConfig())
+    detector = LeakDetector()
+    results = []
+    for i, case in enumerate(cases, 1):
+        result = run_case(
+            case, detector, model=model,
+            include_policy=(arm.key != "no_prompt"), layers=layers,
+        )
+        results.append(result)
+        mark = "LEAK" if result.leaked else "ok"
+        print(f"    [{i:>2}/{len(cases)}] {mark:<4} {result.id}")
+    summary = summarise(results, arm.key)
+    summary["arm"] = arm.label
+    summary["expected"] = arm.expectation
+    return summary
 
 
 def main() -> int:

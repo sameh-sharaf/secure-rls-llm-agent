@@ -214,6 +214,25 @@ The dataset is engineered so a failure would be *visible*: one canary row per
 tenant (`ZZ_CANARY_ACME`, salary 999999), names colliding across tenants, and
 prompt-injection payloads planted in three real `notes` fields.
 
+### Layer lab
+
+`SECURE_RLS_LAB=1` adds a panel to the Security tab that switches L3, L4 and L5
+off in any combination and fires an attack at a **throwaway** gateway built for
+that probe alone. The live session keeps every layer: a weakened stack is a
+separate object, not a change to the running app.
+
+```bash
+SECURE_RLS_LAB=1 python -m streamlit run app.py
+```
+
+Off by default, because a control labelled "switch the security layers off"
+sitting in a shipped app invites one reading and it is the wrong one.
+
+Layers 1 and 2 have no switch, and that is the interesting part. L1 *builds*
+the session, so "off" is not a weaker system but no session at all; L2 is the
+shape of the tool schema, so "off" means writing a different tool that takes a
+tenant argument. Neither is a runtime check that can be skipped.
+
 ---
 
 ## Evaluation
@@ -351,7 +370,7 @@ python -m evals.report evals/results/*.json
 ## Testing
 
 ```bash
-python -m pytest tests/ -q      # 387 tests, no model required
+python -m pytest tests/ -q      # 392 tests, no model required
 ```
 
 `tests/test_boundary.py` is the central one: a fixed corpus of smuggling

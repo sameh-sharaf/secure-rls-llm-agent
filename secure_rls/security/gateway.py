@@ -19,6 +19,7 @@ from pathlib import Path
 
 from db import DB_PATH, MAX_ROWS, SecurityError, TenantDatabase, tenant_user_ids
 from secure_rls.security.audit import AuditLog
+from secure_rls.security.layers import ALL_LAYERS, LayerConfig
 from secure_rls.security.output_guard import GuardVerdict, OutputGuard
 from secure_rls.security.principal import Principal
 from secure_rls.security.spec import (
@@ -71,15 +72,34 @@ class QueryGateway:
         *,
         audit: AuditLog | None = None,
         db_path: Path = DB_PATH,
+        layers: LayerConfig = ALL_LAYERS,
     ) -> None:
         self.principal = principal
         self.audit = audit or AuditLog()
+        # Defaults to every layer on. A weakened gateway is a separate object
+        # built with an explicit argument -- it never mutates module state, so
+        # one experiment cannot remove a control from another live session.
+        self.layers = layers
         # The tenant is read from the principal exactly here, and never again.
-        self._db = TenantDatabase(principal.tenant_id, db_path)
+        self._db = TenantDatabase(
+            principal.tenant_id, db_path, boundary=layers.l4_database_boundary
+        )
         self._guard = OutputGuard(
             tenant=principal.tenant_id,
             allowed_user_ids=tenant_user_ids(principal.tenant_id, db_path),
         )
+        if not layers.all_on:
+            # A gateway with a control switched off is itself a security event.
+            self.audit.record(
+                principal=principal,
+                tool="__gateway__",
+                arguments=layers.describe(),
+                sql=None,
+                rows_returned=0,
+                guard_verdict="n/a",
+                outcome="weakened gateway constructed",
+                latency_ms=0,
+            )
 
     # -------------------------------------------------------------- reads ---
 
@@ -100,7 +120,7 @@ class QueryGateway:
             self._audit(tool, spec.model_dump_json(), None, 0, "n/a", f"rejected: {exc}", started)
             raise
 
-        verdict = self._guard.check_rows(rows)
+        verdict = self._check_rows(rows)
         self._audit(
             tool, spec.model_dump_json(), compiled.sql, len(rows), verdict.summary, "ok", started
         )
@@ -124,8 +144,13 @@ class QueryGateway:
         hidden = self.principal.policy.hidden_columns()
 
         try:
-            guarded: GuardResult = guard_sql(
-                sql, masked_columns=masked, hidden_columns=hidden
+            guarded: GuardResult = (
+                guard_sql(sql, masked_columns=masked, hidden_columns=hidden)
+                if self.layers.l3_query_gateway
+                # L3 off: the statement goes to the database exactly as the
+                # model wrote it. Whether that leaks is the question the
+                # ablation exists to answer, and the answer is layer 4's.
+                else GuardResult(sql=sql, original_sql=sql, rewrites=[])
             )
             rows = self._db.execute(guarded.sql, [])
             if guarded.aggregate_only:
@@ -134,7 +159,7 @@ class QueryGateway:
             self._audit(tool, sql, None, 0, "n/a", f"rejected: {exc}", started)
             raise
 
-        verdict = self._guard.check_rows(rows)
+        verdict = self._check_rows(rows)
         self._audit(tool, sql, guarded.sql, len(rows), verdict.summary, "ok", started)
         return QueryResult(
             rows=rows, sql=guarded.sql, rewrites=guarded.rewrites, verdict=verdict
@@ -217,7 +242,7 @@ class QueryGateway:
                 )
             out = [{alias: float(frame[column].quantile(quantile))}]
 
-        verdict = self._guard.check_rows(out)
+        verdict = self._check_rows(out)
         self._audit(
             tool, spec.model_dump_json(), compiled.sql, len(out), verdict.summary, "ok", started
         )
@@ -299,12 +324,27 @@ class QueryGateway:
 
     # -------------------------------------------------------------- misc ----
 
+    def _check_rows(self, rows: list[dict]) -> GuardVerdict:
+        """Layer 5, or a no-op verdict when it is switched off.
+
+        Every result in this class goes through here rather than calling the
+        guard directly, so there is one place the switch is read. A second call
+        site that reached `self._guard` straight would be a control that some
+        results skip -- which is the shape of invariant 5b, applied to the
+        guard instead of the mask.
+        """
+        if not self.layers.l5_output_guard:
+            return GuardVerdict(ok=True, rows_checked=len(rows))
+        return self._guard.check_rows(rows)
+
     def verify_rows(self, rows: list[dict]) -> GuardVerdict:
         """Re-check an arbitrary result set. Used by the graph's guard node."""
-        return self._guard.check_rows(rows)
+        return self._check_rows(rows)
 
     def check_answer(self, text: str) -> GuardVerdict:
         """Scan the model's final prose for foreign canaries before display."""
+        if not self.layers.l5_output_guard:
+            return GuardVerdict(ok=True)
         return self._guard.check_text(text)
 
     def redact(self, text: str | None) -> str | None:

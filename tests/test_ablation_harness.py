@@ -23,7 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import SecurityError  # noqa: E402
-from evals.ablation import _Patches  # noqa: E402
+from secure_rls.security.layers import LayerConfig  # noqa: E402
 from secure_rls.security.output_guard import LeakDetected  # noqa: E402
 from secure_rls.security.principal import authenticate  # noqa: E402
 from secure_rls.security.sql_guard import SqlRejected  # noqa: E402
@@ -34,21 +34,32 @@ from secure_rls.security.sql_guard import SqlRejected  # noqa: E402
 ATTACK = "SELECT user_id, name, salary FROM employees_base ORDER BY user_id DESC LIMIT 20"
 
 
-def _run_attack(*disable: str):
-    """Run ATTACK with the named layers disabled. Returns rows or raises."""
-    patches = _Patches()
-    for layer in disable:
-        getattr(patches, f"disable_{layer}")()
-    try:
-        from secure_rls.security.gateway import QueryGateway
+_LAYER_FIELD = {
+    "l3": "l3_query_gateway",
+    "l4": "l4_database_boundary",
+    "l5": "l5_output_guard",
+}
 
-        gateway = QueryGateway(authenticate("acme_admin", "acme123"))
-        try:
-            return gateway.run_sql(ATTACK).rows
-        finally:
-            gateway.close()
+
+def _config(*disable: str) -> LayerConfig:
+    return LayerConfig(**{_LAYER_FIELD[d]: False for d in disable})
+
+
+def _run_attack(*disable: str):
+    """Run ATTACK with the named layers disabled. Returns rows or raises.
+
+    The weakened stack is built by the constructor. It used to be built by
+    patching module globals, which is why this file exists at all -- the
+    harness patched a name the gateway never looked up and reported a
+    confident 0.00% for every arm, including the one designed to leak.
+    """
+    from secure_rls.security.gateway import QueryGateway
+
+    gateway = QueryGateway(authenticate("acme_admin", "acme123"), layers=_config(*disable))
+    try:
+        return gateway.run_sql(ATTACK).rows
     finally:
-        patches.restore()
+        gateway.close()
 
 
 def test_full_stack_blocks_at_layer_3() -> None:
@@ -93,18 +104,46 @@ def test_the_naive_build_leaks() -> None:
     assert foreign, "the naive arm did not leak; the harness is not disabling anything"
 
 
-def test_restore_puts_every_layer_back() -> None:
-    """Each arm must start from a clean stack, or arms contaminate each other.
+def test_a_weakened_gateway_does_not_weaken_a_live_one() -> None:
+    """The property that made configuration worth the refactor.
 
-    The original `restore()` returned `guard_sql` to the module it was read
-    from rather than the one it was patched in, leaving the gateway
-    permanently pass-through for every arm after the first.
+    Streamlit serves every signed-in browser from one process. While the
+    layers were disabled by patching `OutputGuard.check_rows` on the *class*
+    and `db.tenant_connection` in the module, running one experiment removed
+    those controls for every other session in the process, and an exception
+    between patch and restore left them off with nothing saying so.
+
+    Built by constructor argument, a weakened gateway is just another object.
+    This test holds one open and asserts a normally-constructed gateway is
+    still fully armed -- at the same time, in the same process.
     """
+    from secure_rls.security.gateway import QueryGateway
+
+    weak = QueryGateway(authenticate("acme_admin", "acme123"), layers=_config("l3", "l4", "l5"))
+    strong = QueryGateway(authenticate("acme_admin", "acme123"))
+    try:
+        # The weak one leaks, as its arm is designed to.
+        leaked = {int(r["user_id"]) for r in weak.run_sql(ATTACK).rows}
+        assert {i for i in leaked if i > 500}
+
+        # The strong one, alive at the same moment, refuses at layer 3...
+        with pytest.raises(SqlRejected):
+            strong.run_sql(ATTACK)
+        # ...and its output guard is still the real one, not a stub.
+        with pytest.raises(LeakDetected):
+            strong.verify_rows([{"user_id": 999, "name": "ZZ_CANARY_GAMMA"}])
+    finally:
+        weak.close()
+        strong.close()
+
+
+def test_every_arm_starts_from_a_clean_stack() -> None:
+    """Arms must not contaminate each other, whatever the mechanism."""
     with pytest.raises(LeakDetected):
         _run_attack("l3", "l4")
     with pytest.raises(SqlRejected):
-        _run_attack()          # L3 must be back
+        _run_attack()          # L3 still there
     with pytest.raises(SecurityError, match=_L4_DENIED):
-        _run_attack("l3")      # L4 must be back
+        _run_attack("l3")      # L4 still there
     with pytest.raises(LeakDetected, match="does not belong"):
-        _run_attack("l3", "l4")  # L5 must be back
+        _run_attack("l3", "l4")  # L5 still there
