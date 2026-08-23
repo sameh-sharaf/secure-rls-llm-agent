@@ -270,3 +270,49 @@ def test_spec_in_list_is_bound_not_interpolated() -> None:
     assert "DROP" not in compiled.sql
     assert "IN (?, ?)" in compiled.sql
     assert "Sales'; DROP TABLE employees --" in compiled.params
+
+
+# ------------------------------------------- a refusal must give a true reason ---
+# Reported from the layer lab: the UNION smuggling probe was refused as "only
+# SELECT statements are permitted". It is a SELECT. sqlglot parses a set
+# operation as `exp.Union`, so the isinstance check fired first and the table
+# allowlist -- the control that should have caught `employees_base` -- never ran.
+
+
+def test_a_smuggled_base_table_is_named_as_the_reason_even_inside_a_union() -> None:
+    sql = ("SELECT user_id, name FROM employees UNION "
+           "SELECT user_id, name FROM employees_base ORDER BY user_id DESC LIMIT 20")
+    with pytest.raises(SqlRejected, match="employees_base"):
+        guard_sql(sql)
+
+
+def test_a_union_over_the_allowed_table_is_refused_as_a_union() -> None:
+    """Still refused -- but for the reason that is actually true.
+
+    A set operation grafts a second query onto the first, which is a class of
+    smuggling not worth reasoning about for a one-table schema. The message
+    now says so, and points at the rewrite that works.
+    """
+    sql = ("SELECT name FROM employees WHERE department = 'Sales' UNION "
+           "SELECT name FROM employees WHERE department = 'Legal'")
+    with pytest.raises(SqlRejected, match="UNION is not permitted"):
+        guard_sql(sql)
+
+
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        ("SELECT name FROM employees INTERSECT SELECT name FROM employees", "INTERSECT"),
+        ("SELECT name FROM employees EXCEPT SELECT name FROM employees", "EXCEPT"),
+    ],
+    ids=["intersect", "except"],
+)
+def test_the_other_set_operations_are_refused_by_name(sql: str, expected: str) -> None:
+    with pytest.raises(SqlRejected, match=expected):
+        guard_sql(sql)
+
+
+def test_a_genuine_non_select_still_says_so() -> None:
+    """The old message was not wrong in general, only wrong for set operations."""
+    with pytest.raises(SqlRejected, match="read-only SELECT"):
+        guard_sql("DELETE FROM employees")

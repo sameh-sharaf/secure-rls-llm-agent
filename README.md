@@ -36,7 +36,7 @@ instructed not to.
 ## Repository layout
 
 ```
-db.py                   layer 4 -- the boundary. Read this first.
+db.py                   layer 4 -- the boundary
 agent.py                LangGraph state machine
 app.py                  Streamlit UI (thin; no security logic)
 employees.csv           1000 rows, 3 tenants, seeded

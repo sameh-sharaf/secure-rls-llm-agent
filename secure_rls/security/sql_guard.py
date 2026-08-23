@@ -103,6 +103,27 @@ def _check_no_forbidden_nodes(tree: exp.Expression) -> None:
         _fail("common table expressions are not permitted; use a subquery or a simpler query")
 
 
+def _check_set_operations(tree: exp.Expression) -> None:
+    """Refuse UNION, INTERSECT and EXCEPT, and say so accurately.
+
+    Refused for the reason CTEs are: a set operation grafts a second query
+    onto the first, which is a whole class of smuggling to reason about for a
+    schema that has exactly one readable table. Everything a union can express
+    here, `OR` or `IN` expresses without the branch.
+
+    This was previously enforced by accident. `isinstance(tree, exp.Select)`
+    is False for a set operation, so unions were rejected as "not a SELECT" --
+    including perfectly ordinary ones over `employees` alone, which nothing
+    documented.
+    """
+    for node_type in (exp.Union, exp.Intersect, exp.Except):
+        if isinstance(tree, node_type) or list(tree.find_all(node_type)):
+            _fail(
+                f"{node_type.__name__.upper()} is not permitted; combine the branches "
+                f"with OR or IN in a single SELECT over 'employees'"
+            )
+
+
 def _check_tables(tree: exp.Expression) -> None:
     for table in tree.find_all(exp.Table):
         name = (table.name or "").lower()
@@ -270,11 +291,24 @@ def guard_sql(
         _fail(f"exactly one statement is permitted, found {len(statements)}")
 
     tree = statements[0]
+
+    _check_no_forbidden_nodes(tree)
+
+    # Tables are checked before the statement *shape* is, so that a smuggled
+    # base table is named as the reason even when the statement is also
+    # refusable for another cause. `SELECT ... UNION SELECT ... FROM
+    # employees_base` used to be rejected as "only SELECT statements are
+    # permitted", because sqlglot parses a set operation as `exp.Union` rather
+    # than `exp.Select` -- a true refusal with a false explanation, and one
+    # that stopped this guard's allowlist from ever running on the attack it
+    # was written for. A wrong reason is worse than a terse one: the model
+    # revises against it, and a reader believes it.
+    _check_tables(tree)
+    _check_set_operations(tree)
+
     if not isinstance(tree, exp.Select):
         _fail("only SELECT statements are permitted")
 
-    _check_no_forbidden_nodes(tree)
-    _check_tables(tree)
     _check_columns(tree)
     _check_functions(tree)
     _check_hidden_columns(tree, hidden_columns)
