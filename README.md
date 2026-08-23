@@ -370,7 +370,7 @@ python -m evals.report evals/results/*.json
 ## Testing
 
 ```bash
-python -m pytest tests/ -q      # 392 tests, no model required
+python -m pytest tests/ -q      # 394 tests, no model required
 ```
 
 `tests/test_boundary.py` is the central one: a fixed corpus of smuggling
