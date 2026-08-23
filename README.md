@@ -18,6 +18,7 @@ instructed not to.
   - [Tenant binding](#tenant-binding)
   - [How SQLite gets real row-level security](#how-sqlite-gets-real-row-level-security)
   - [The agent](#the-agent)
+  - [One question, traced through every layer](#one-question-traced-through-every-layer)
 - [Setup](#setup)
   - [Tenant credentials](#tenant-credentials)
 - [Security testing](#security-testing)
@@ -164,6 +165,71 @@ inspects the compiled graph, not by a comment. The loop adds an edge *out* of
 `guard`, never one around it: every result passes layer 5 before the model sees
 it, on every round. Conversation memory is checkpointed per `(thread, tenant)`:
 history is tenant data too.
+
+
+### One question, traced through every layer
+
+Signed in as `acme_admin`, asking *"What is the highest salary for Operations
+department?"*. Every value below is a real capture from a run.
+
+**The model emits JSON.** Untrusted, and not a layer:
+
+```json
+{"select": ["salary"],
+ "filters": [{"column": "department", "op": "=", "value": "Operations"}],
+ "metrics": ["max"]}
+```
+
+**L2** (`tools/factory.py`) validates the shape and returns a typed object:
+
+```
+select        = [Column.SALARY]        # strings are now enum members
+metrics       = ['max']
+metric_column = salary                 # defaulted; the model never said it
+filters       = [FilterArg(column=Column.DEPARTMENT, op=Operator.EQ,
+                           value='Operations')]
+limit         = 100                    # defaulted
+
+a "tenant_id" key here would be a ValidationError -- the field does not exist
+```
+
+**L3** (`security/spec.py`) authorises the request, then compiles it:
+
+```sql
+SELECT salary, MAX(salary) AS max_salary FROM employees WHERE department = ? LIMIT ?
+-- params: ['Operations', 100]
+```
+
+`"Operations"` never enters the statement; it is bound. There is no tenant
+filter because there are no other tenants to exclude. The *same spec* as
+`acme_analyst` is refused here instead -- that role may not read an individual
+salary, and is pointed at `p90`, a median or an average.
+
+**L4** (`db.py`) runs it against a connection holding 500 acme rows:
+
+```
+[{'salary': 999999, 'max_salary': 999999}]
+```
+
+**L5** (`security/output_guard.py`, `audit.py`) verifies and records:
+
+```
+verdict = ok -- "1 rows, no identifying columns to verify"
+audit   = tool=query_db rows=1 outcome=ok
+          prev_hash=0000000000000000...    # genesis: first entry
+          entry_hash=a0a3e2a0e9a7b860...   # chains the next one
+```
+
+No `user_id` was projected, so there was no id to check against the privileged
+set -- the guard says exactly that rather than implying it verified more.
+
+Two things the trace shows that prose does not. **Nothing carries a tenant** --
+not the JSON, not the spec, not the SQL; the word never appears after login,
+because the connection makes it unnecessary. And the **999,999 is acme's own
+canary row**, a planted employee with an absurd salary, so returning it here is
+correct. If that number surfaced in a `beta` session, layer 5 would raise
+before anyone saw it.
+
 
 ---
 
