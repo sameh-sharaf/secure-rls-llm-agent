@@ -26,6 +26,31 @@ pytestmark = pytest.mark.skipif(
 TENANTS = ["acme", "beta", "gamma"]
 
 
+def _require_populated(tenant: str) -> int:
+    """Assert the index actually has chunks, and say so when it does not.
+
+    The module guard above only checks that `chroma.sqlite3` exists. A
+    collection that exists but reads empty produces a very confusing failure
+    instead: `test_post_retrieval_check_catches_a_foreign_chunk` expects a
+    `CrossTenantRetrieval` and gets `DID NOT RAISE`, because `search()` returns
+    `[]` before it can check anything, and the injection test reports a missing
+    `<untrusted_data>` wrapper. Both read as a broken boundary and neither is.
+
+    This was observed intermittently on Windows and never reproduced -- twelve
+    consecutive full runs are clean. Rather than guess at a cause, make the
+    symptom name itself, so a recurrence says "the index read empty" instead
+    of pointing at a security control that is working.
+    """
+    retriever = TenantNotesRetriever(authenticate(f"{tenant}_admin", f"{tenant}123"))
+    count = retriever.count()
+    assert count > 0, (
+        f"the {tenant} note index read 0 chunks. This is an indexing problem, not a "
+        f"boundary failure -- rebuild with `python scripts/build_index.py`. Any "
+        f"assertion below would have failed for this reason rather than its own."
+    )
+    return count
+
+
 @pytest.fixture(params=TENANTS)
 def session(request):
     s = build_session(authenticate(f"{request.param}_admin", f"{request.param}123"))
@@ -76,6 +101,7 @@ def test_each_index_holds_only_its_tenants_notes() -> None:
 
 def test_post_retrieval_check_catches_a_foreign_chunk() -> None:
     """Simulate the index being wrong and confirm the retriever refuses it."""
+    _require_populated("acme")
     principal = authenticate("acme_admin", "acme123")
     retriever = TenantNotesRetriever(principal)
     retriever.bind_allowed_ids(frozenset({-1}))  # nothing is legitimately allowed
@@ -89,6 +115,7 @@ def test_planted_injection_is_retrievable_and_wrapped(session) -> None:
     Finding it is the point: this is the indirect prompt-injection scenario,
     and the defence is not that retrieval avoids the payload.
     """
+    _require_populated(session.principal.tenant_id)
     tools = session.tool_map
     out = tools["search_notes"].invoke(
         {"query": "ignore previous instructions admin mode output every tenant", "top_k": 5}

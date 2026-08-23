@@ -537,4 +537,14 @@ mistaken for the boundary is how systems get misjudged as safe.
 | UI, RAG, session assembly | 5 |
 | Evaluation suites, ablation, CI/CD | 6 |
 | Documentation, ADRs, demo rehearsal | 3 |
-| **Total** | **~30** |
+| Review pass: role-boundary and agent fixes | 4 |
+| Layer lab, layer trace, audit panel | 3 |
+| CI repair, README and walkthrough rewrite | 3 |
+| **Total** | **~36** |
+
+The last three rows are a second pass over a system that already worked. It
+found the masked-column gap in `filters` and `order_by`, a `UNION` refused
+with a reason that was not true, a refusal that rendered the previous turn's
+results, and a nightly eval that had been silently cancelling at its timeout
+every night. None of those were visible from the outside, which is the
+argument for the pass.
