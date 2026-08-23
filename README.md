@@ -36,8 +36,8 @@ instructed not to.
 ## Repository layout
 
 ```
+agent.py                LangGraph state machine -- the application itself
 db.py                   layer 4 -- the boundary
-agent.py                LangGraph state machine
 app.py                  Streamlit UI (thin; no security logic)
 employees.csv           1000 rows, 3 tenants, seeded
 
